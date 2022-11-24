@@ -1,0 +1,14 @@
+.navbar{
+    width: 40%;
+    padding-top: 1%;
+    display: flex;
+    a {
+        font-size: .8rem;
+        flex: 1;
+        min-width: 100px;
+        text-decoration: none;
+        color: $mainFontColor;
+    }
+
+}
+

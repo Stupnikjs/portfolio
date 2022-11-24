@@ -1,0 +1,132 @@
+.curriculum{
+    background-color: $mainColor;
+    height: 100vh;
+    @include flexBoxCenter; 
+    font-size: 0.50rem; 
+}
+
+
+
+
+.cv{
+    overflow: hidden;
+    height: 90vh;
+    width: 70vw;
+    display: grid;
+    grid-template-columns: 25% 1fr;
+    background-color: white;
+    box-shadow: 0.25rem -0.25rem 0.5rem rgb(58, 55, 55), -0.25rem 0.25rem 0.5rem rgb(58, 55, 55);
+    margin: auto;
+}
+
+aside{
+    padding-left: 5%;
+    background-color: $thirdColor;
+    display: flex;
+    flex-direction: column;
+    
+   
+    .lienspro{
+        font-size: 0.5rem;
+        a{
+            display: block;
+        }
+    }
+    .langues{
+        img{
+            width: 10%;
+            object-fit: cover;
+        }
+    }
+    & > * {
+        margin: 10% 0 ;
+    }
+}
+
+
+.mainSection{
+    padding-left: 5%;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+
+
+    article{
+       
+       width: 85%;
+       h2{
+        border-bottom: 1px solid black;
+       }
+       ul{
+        margin-top: 5%;
+        border-left: 1px solid black;
+        
+       }
+       ul#devskills{
+        display: grid;
+        grid-template-columns: repeat( auto-fit, minmax(100px, 1fr) );
+        
+        li{
+            width: 100%;
+            display: inline-block;
+            margin-bottom: 5%;
+            
+            font-weight: 600;
+            
+            & > * {
+                display: inline;
+                float: right;
+                margin-right: 25px;
+                     
+            }
+            
+            &:first-child > svg{
+                color: rgb(230, 71, 71);
+            }
+            &:nth-child(2) > svg {
+                color:orange;
+            }
+            &:nth-child(3) > svg {
+                color:rgb(221, 221, 79);
+            }
+            &:nth-child(4) > svg {
+                color:green;
+                
+            }
+            &:nth-child(5) > svg {
+                color:rgb(60, 150, 202);
+                
+            }
+            &:nth-child(5){
+                
+                font-weight: 400;
+            }
+        }
+       }
+
+        li{
+            
+            margin: 0 3% 0 0;
+
+            list-style-type: none;
+            svg{
+                font-size: 1.2rem;
+            }
+       }
+       
+       
+
+    }
+}
+
+
+.profilePicture{
+ 
+    object-fit: cover;
+    margin: 5% 7% 0 auto;
+    width: 90%;
+    height: auto;
+    border-radius: 50%;
+    box-shadow: .25rem -.25rem .55rem rgba(black, .2), -.25rem .25rem .55rem rgba(black, .2); 
+
+}

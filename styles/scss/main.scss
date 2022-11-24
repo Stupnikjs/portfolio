@@ -1,0 +1,48 @@
+$mainColor: rgb(190, 187, 165);
+$mainFontColor : rgb(230, 222, 222);  
+$colorSecundary: rgb(52, 102, 102); 
+$secundFontColor: rgb(172, 152, 152);
+$thirdColor : rgb(223, 238, 240);  
+
+@import url('https://fonts.googleapis.com/css2?family=Lora&family=Noto+Sans+HK:wght@300&family=Passions+Conflict&display=swap');
+ 
+
+$mainFont: "Lora"; 
+
+body{
+    
+    margin: 0; 
+    font-family: $mainFont;
+    background-color: $mainColor;
+      
+}
+
+
+
+
+.back{
+    font-size: 1rem; 
+    color: white;
+    text-decoration: none ;
+    position: absolute; 
+    top : 2%; 
+    left : 2%;  
+}
+
+@import "./mixin/mixin.scss"; 
+@import "./components/navbar";
+@import "./components/vertical";
+@import "./components/project"; 
+@import "./components/content"; 
+@import "./components/intro"; 
+@import "./components/headeur";
+@import "./components/loader";
+@import "./keyframes/keyframes";
+@import './pages/curriculum';
+@import './pages/experience';
+@import './pages/home';
+
+
+
+
+
