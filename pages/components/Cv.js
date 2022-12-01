@@ -1,7 +1,7 @@
 import React from 'react';
 import PP from './PP';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faNodeJs, faJs, faGolang, faCss3, faHtml5 } from '@fortawesome/free-brands-svg-icons';
+import { faNodeJs, faJs, faCss3, faHtml5 } from '@fortawesome/free-brands-svg-icons';
 import drapeauFr from "../../public/images/France.png"
 import drapeauEn from "../../public/images/anglais.png"
 import drapeauEs from "../../public/images/espagne.png"
@@ -10,7 +10,7 @@ import Link from 'next/link';
 
 const Cv = () => {
     return (
-        <div className='cv'>
+        <div className='cv shadow-slate-500 bg-slate-300'>
            <aside>
             <PP></PP>
             <div className='contact'>

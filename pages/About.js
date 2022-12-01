@@ -1,5 +1,5 @@
 import React from 'react';
-import Headeur from '../components/Headeur';
+import Headeur from '../layout/Headeur';
 import Content from '../components/Content';
 
 const About = () => {

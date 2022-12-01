@@ -3,3 +3,15 @@
     background: linear-gradient(to left , $mainColor, $colorSecundary);
 
 }
+
+.contactButton{
+    width: 50%;
+    border: none;
+    margin: auto;
+    background-color: $mainColor;
+    opacity: 0.3;
+    font-family: $mainFont;
+    padding: 5%;
+    cursor: pointer;
+
+}
