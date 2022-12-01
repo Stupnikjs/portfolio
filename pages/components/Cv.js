@@ -35,7 +35,7 @@ const Cv = () => {
             <article>
                 <h2> Experience Professionelle </h2>
                 <ul>
-                    <li> Pharmacien d'Officine diplomé depuis 2018 </li>
+                    <li> Pharmacien d Officine diplomé depuis 2018 </li>
                     
                 </ul>
             </article>
