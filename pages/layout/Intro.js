@@ -1,5 +1,5 @@
 import React from 'react';
-import StyleBar from '../components/styleBar';
+
 
 
 const Intro = () => {

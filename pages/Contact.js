@@ -1,5 +1,5 @@
 import React from 'react';
-import Headeur from '../layout/Headeur';
+import Headeur from './layout/Headeur'
 
 const Contact = () => {
     return (

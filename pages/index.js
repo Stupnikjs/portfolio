@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import Headeur from './layout/Headeur'
 import Intro from './layout/Intro';
 import Vertical from './layout/Vertical';
-import StyleBar from './components/styleBar';
+import StyleBar from './components/StyleBar';
 import Link from 'next/link';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {faTwitter, faLinkedin, faGithub} from '@fortawesome/free-brands-svg-icons'
