@@ -1,6 +1,6 @@
 import React from 'react';
-import Headeur from '../layout/Headeur';
-import Content from '../components/Content';
+import Headeur from './layout/Headeur'
+
 
 const About = () => {
     return (
