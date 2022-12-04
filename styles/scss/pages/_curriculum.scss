@@ -15,8 +15,9 @@
     display: grid;
     grid-template-columns: 25% 1fr;
     background-color: white;
-    box-shadow: 0.25rem -0.25rem 0.5rem rgb(58, 55, 55), -0.25rem 0.25rem 0.5rem rgb(58, 55, 55);
+    box-shadow: 0.15rem -0.15rem 0.1rem rgb(58, 55, 55), -0.2rem 0.2rem 0.2rem rgb(58, 55, 55);
     margin: auto;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 aside{
@@ -32,16 +33,17 @@ aside{
             display: block;
         }
     }
-    .langues{
-        img{
-            width: 10%;
-            object-fit: cover;
-        }
-    }
+    
+    
     & > * {
         margin: 10% 0 ;
     }
+    img{
+        width: 10%;
+        height: 10%;
+    }
 }
+
 
 
 .mainSection{

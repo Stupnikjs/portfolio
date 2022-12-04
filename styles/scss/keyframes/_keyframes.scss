@@ -32,3 +32,25 @@
         transform: translateY(0);
     }
 }
+
+
+@keyframes hoverSlide {
+    
+    0% {
+        transform: translateY(0);
+    }
+    100%{
+        transform: translateY(-10%);
+    }
+
+}
+
+@keyframes hoverOff{
+    0%{
+        transform: translateY(-10%);
+    }
+    100% {
+        transform: translateY(0);
+    }
+    
+}

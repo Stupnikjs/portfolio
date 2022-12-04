@@ -2,6 +2,7 @@ import React from 'react';
 import PP from './PP';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faNodeJs, faJs, faCss3, faHtml5 } from '@fortawesome/free-brands-svg-icons';
+import Image from 'next/image';
 import drapeauFr from "../../public/images/France.png"
 import drapeauEn from "../../public/images/anglais.png"
 import drapeauEs from "../../public/images/espagne.png"
@@ -23,19 +24,19 @@ const Cv = () => {
                 <Link href="https://www.linkedin.com/in/nicolas-boudier-1a0392239/">linkedin.com/in/nicolas-boudier-1a0392239/</Link>
             </div>
             <div className='langues'>
-                <p> <img src={drapeauFr}></img> Francais, langue maternelle </p>
-                <p> <img src={drapeauEn}></img> Anglais, professionel </p>
-                <p> <img src={drapeauEs}></img> Espagnol, basique </p>
+                <p> <Image src={drapeauFr}/> Francais, langue maternelle </p>
+                <p> <Image src={drapeauEn}/> Anglais, professionel </p>
+                <p> <Image src={drapeauEs}/> Espagnol, basique </p>
             </div>
 
            </aside>
            
            <section className='mainSection'>
-           <h1> Developpeur Javascript Junior </h1>
+           <h1> Developpeur Web Javascript/REACT   </h1>
             <article>
                 <h2> Experience Professionelle </h2>
                 <ul>
-                    <li> Pharmacien d Officine diplomé depuis 2018 </li>
+                    <li> Pharmacien diplomé depuis 2018,  en exercice dans une pharmacie de centre ville </li>
                     
                 </ul>
             </article>
@@ -59,7 +60,7 @@ const Cv = () => {
             <article>
                 <h2> Soft Skills </h2>
                 <ul>
-                    <li> Relation client </li>
+                    <li> Relation client, ecoute, empathie </li>
                     <li> Connaisances médicales avancées  </li>
 
                 </ul>

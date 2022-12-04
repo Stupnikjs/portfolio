@@ -18,6 +18,8 @@
    
 }
 
+
+
 #email > .verticalLine{
     height: 160px;
 }
@@ -37,6 +39,14 @@ a{
 }
 
 
+.verticalContent:hover{
+    animation: hoverSlide 0.5s linear forwards;
+}
+
+
+.verticalContent:not(:hover){
+    animation: hoverOff 0.5s linear forwards;
+}
 
 #email{
     grid-column: 1;
