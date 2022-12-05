@@ -1,7 +1,6 @@
 import  Loader  from './components/Loader';
 import { useState, useEffect } from 'react';
 import Headeur from './layout/Headeur'
-import Intro from './layout/Intro';
 import Vertical from './layout/Vertical';
 import StyleBar from './components/StyleBar';
 import Link from 'next/link';
@@ -11,14 +10,14 @@ import {faTwitter, faLinkedin, faGithub} from '@fortawesome/free-brands-svg-icon
 export default function Home() {
 
     const [loader, setLoader] = useState(true); 
-    let elarray = new Array(5).fill(1)
+    let elarray = new Array(11).fill(1)
 
     
 
     const returnStyle = (x, y, op) => {
         /* rotation de 90 dans le css donc inversion des x et y */
         return {
-            transform: `translateX(${-15*x +5 }%) scaleX(0.5) translateY(${-20*y}%)`, 
+            transform: `translateX(${x}%) scaleX(0.2) translateY(${y}%)`, 
             opacity: op,
             backgroundColor: "lightblue", 
             border: "0.7px solid grey"
@@ -37,7 +36,12 @@ export default function Home() {
         <div className={"home"} >
             <Headeur></Headeur>
             <main className='main'>
-            <Intro></Intro>
+            <div className='intro'>
+                <p>Bonjour, je m appelle </p>
+                <h1><strong>Nicolas,</strong> Boudier </h1>
+                <p>Developpeur <strong className='strong'>Javascript</strong> </p>
+                <p> Fort d une experience atypique, j aspire à developper mes competences en participant a des projets </p>
+            </div>
             <section className='section'> Passioné par le developpement, j étudie toutes les propositions, </section>
             <button className='contactButton'>contactez moi</button>
             {

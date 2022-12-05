@@ -1,9 +1,47 @@
-.experience > section {
-    color: white;
+
+.experience{
+    background: linear-gradient(to left , rgb(183, 226, 183), rgb(161, 161, 197) )
+}
+
+.intro-experience{
+    margin: 10% auto;
+    width: 90%;
+    height: 100vh;
     text-align: center;
+    color: rgb(38, 59, 59);
+    
+}
+
+.intro-experience-title{
+    margin: 10% auto;
+}
+
+.asten{
+    img{
+        width: 50%;
+        height: auto;
+    }
+}
+
+.photo-div{
+    display: flex;
+    width: 70%;
+    margin: auto;
+    
 }
 
 .pharmacie{
-    background-color: antiquewhite;
+
     height: 100vh;
+    text-align: center;
+    article{
+        width: 80%;
+        margin: auto;
+        img{
+            width: 20%;
+            height: auto;
+        }
+    }
+
 }
+

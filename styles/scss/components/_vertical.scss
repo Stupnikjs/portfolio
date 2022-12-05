@@ -40,12 +40,12 @@ a{
 
 
 .verticalContent:hover{
-    animation: hoverSlide 0.5s linear forwards;
+    animation: hoverSlide 0.5s ease-in-out forwards;
 }
 
 
 .verticalContent:not(:hover){
-    animation: hoverOff 0.5s linear forwards;
+    animation: hoverOff 0.5s ease-in-out forwards;
 }
 
 #email{
