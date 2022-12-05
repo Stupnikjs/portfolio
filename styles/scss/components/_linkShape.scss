@@ -1,0 +1,16 @@
+.linkShape{
+    height: 15vh;
+    width: 15vh;
+    border-radius: 50%;
+    background: linear-gradient(to right, transparent, rgb(48, 156, 138));
+    animation: rolling 4s forwards;
+
+
+    @include flexBoxCenter; 
+    & > * {
+        font-size: 2rem;
+        padding: 2%;
+        
+        
+    }
+}

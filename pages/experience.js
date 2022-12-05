@@ -8,6 +8,7 @@ import photoAsten from "../public/images/asten-avocats.png";
 import photoAsten2 from "../public/images/main-asten.png"; 
 import photoPharmacie from '../public/images/pharmacie.jpg'
 import Vertical from './layout/Vertical';
+import LinkShape from './components/LinkShape';
 
 
 const Experience = () => {
@@ -36,12 +37,7 @@ const Experience = () => {
                 <p> Bien qu insatisfait par le rôle du Pharmacien, mon diplome et mon experience professionelle m'on permis de develloper des capacités d'empathie de colaboration, de travail sur soi </p> 
             </article>
         </section>
-        <Vertical id="email"> n.boudier.ph@gmail.com </Vertical>
-            <Vertical id="media"> 
-               <Link href="https://twitter.com/BoudierDev"><FontAwesomeIcon icon={faTwitter}></FontAwesomeIcon></Link> 
-               <Link href="https://github.com/Stupnikjs"><FontAwesomeIcon icon={faGithub}></FontAwesomeIcon></Link> 
-                <Link href="https://github.com/Stupnikjs"><FontAwesomeIcon icon={faLinkedin}></FontAwesomeIcon></Link>
-             </Vertical>  
+        <LinkShape></LinkShape> 
     </div>
     );
 };
