@@ -14,13 +14,12 @@ import Link from 'next/link';
 
 const Cv = () => {
 
-    const printRef = useRef()
 
    
     
 
     return (
-        <div ref={printRef} className='cv shadow-slate-500 bg-slate-300'  >
+        <div  className='cv shadow-slate-500 bg-slate-300'  >
            <aside>
             <PP></PP>
             <div className='contact'>
@@ -31,7 +30,7 @@ const Cv = () => {
             <div className='lienspro'>
                 <Link href="https://github.com/Stupnikjs">github.com/Stupnikjs</Link>
                 <Link href="https://www.linkedin.com/in/nicolas-boudier-1a0392239/">linkedin.com/in/nicolas-boudier-1a0392239/</Link>
-                <Link href="#">n.boudier.ph@gmail.com</Link>
+                <p>n.boudier.ph@gmail.com</p>
             </div>
             <div className='langues'>
                 <p> <Image src={drapeauFr} alt="france-drapeau"/> Francais, langue maternelle </p>
