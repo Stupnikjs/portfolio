@@ -1,15 +1,16 @@
 import React from 'react';
-import Navbar from './Navbar';
+import Navbar from './NavbarFade';
 import Logo from '../components/Logo';
-/* font awsome + react a maitriser */
 
 
-const Headeur = () => {
+
+
+const Headeur = ({scrolled}) => {
     return (
-       <div className='headeur'>    
-        <Logo id={"navLogo"}></Logo>
-        <Navbar></Navbar> 
-       </div> 
+        <div  className={scrolled ? "navandcontact scrolled" : "navandcontact"}>
+                    <Logo></Logo>
+                    <Navbar ></Navbar>
+        </div>
     );
 };
 

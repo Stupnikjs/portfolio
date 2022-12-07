@@ -58,15 +58,3 @@
     
 }
 
-@keyframes rolling {
-    0%{
-        transform: translateX(500%) rotate(0deg);
-    }
-    50% {
-        transform: translateX(250%) rotate(-360deg);
-    }
-
-    100%{
-        transform: translateX(0%) rotate(0deg);
-    }
-}

@@ -1,16 +1,29 @@
 .linkShape{
+    position: fixed;
+    right: 3%;
+    bottom: 20%;
+    border-radius: 10px;
     height: 15vh;
-    width: 15vh;
-    border-radius: 50%;
-    background: linear-gradient(to right, transparent, rgb(48, 156, 138));
-    animation: rolling 4s forwards;
+    display: flex;
+    flex-direction: column;
+    border-width: 1px;
+    padding: 2% 0.5%;
+    
 
 
     @include flexBoxCenter; 
-    & > * {
-        font-size: 2rem;
+    & > *  {
+        font-size: 1.5rem;
         padding: 2%;
         
+        
+       
+        &:hover{
+            opacity: 1;
+            color: rgb(106, 133, 106); 
+            transition: color 1s;
+
+        }
         
     }
 }

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useRef } from 'react';
 import PP from './PP';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faNodeJs, faJs, faCss3, faHtml5, faReact } from '@fortawesome/free-brands-svg-icons';
@@ -10,9 +11,16 @@ import drapeauEs from "../../public/images/espagne.png"
 import Link from 'next/link';
 
 
+
 const Cv = () => {
+
+    const printRef = useRef()
+
+   
+    
+
     return (
-        <div className='cv shadow-slate-500 bg-slate-300'>
+        <div ref={printRef} className='cv shadow-slate-500 bg-slate-300'  >
            <aside>
             <PP></PP>
             <div className='contact'>
@@ -72,6 +80,7 @@ const Cv = () => {
 
            </section>
         </div>
+ 
     );
 };
 

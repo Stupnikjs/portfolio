@@ -5,10 +5,8 @@ import Cv from './components/Cv';
 
 const Curriculum = () => {
 
-    
     return (
-
-        <div className={"curriculum" }>
+        <div className={"curriculum"}>
             <Back></Back>
             <Cv></Cv>
         </div>
