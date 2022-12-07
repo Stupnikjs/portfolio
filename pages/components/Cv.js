@@ -34,9 +34,9 @@ const Cv = () => {
                 <Link href="#">n.boudier.ph@gmail.com</Link>
             </div>
             <div className='langues'>
-                <p> <Image src={drapeauFr}/> Francais, langue maternelle </p>
-                <p> <Image src={drapeauEn}/> Anglais, professionel </p>
-                <p> <Image src={drapeauEs}/> Espagnol, basique </p>
+                <p> <Image src={drapeauFr} alt="france-drapeau"/> Francais, langue maternelle </p>
+                <p> <Image src={drapeauEn} alt="angleterre-drapeau"/> Anglais, professionel </p>
+                <p> <Image src={drapeauEs} alt="espagne-drapeau"/> Espagnol, basique </p>
             </div>
 
            </aside>

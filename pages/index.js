@@ -55,6 +55,7 @@ export default function Home() {
                     <h2>{"Bonjour, je m'appelle"} </h2>
                     <h1><strong>Nicolas,</strong> Boudier </h1>
                     <p>Developpeur <strong className='strong'>Javascript</strong> </p>
+                    
                     <div className="image-container">
                         <Image className={"imageBg"} src={imgBg} alt="image-accueuil"></Image>
                     </div>
