@@ -13,6 +13,53 @@ html, body{
     
 
 
+.anim_project{
+    height: 200px;
+    width: 200px;
+    perspective: 600px;
+  
+}
+    
+
+
+.cube{
+    width: 100%;
+    height: 100%;
+    position: relative;
+    transform-style: preserve-3d;
+  
+}
+    
+
+
+.image{
+    width: 200px;
+    height: 200px; 
+}
+    
+
+
+.anim_item{
+    position: absolute;
+    width: 200px;
+    height: 200px;
+    
+}
+    
+
+
+.anim_item1{
+    transform: rotateY(90deg) translateZ(100px);
+}
+    
+
+
+.anim_item2{
+    transform: rotateY(90deg) translateZ(50px);
+}
+    
+
+
 .main_index{
     padding: 10%;
 }
@@ -23,5 +70,20 @@ html, body{
     padding: 2%;
     border-radius: 20px;
 }
+    
+
+
+.main-experience{
+    padding: 10%;
+}
+    
+
+
+.section-experience-asten .photo-div img{
+            width: 50%;
+            height: auto; 
+            -o-object-fit: cover; 
+               object-fit: cover; 
+        }
 
 

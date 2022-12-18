@@ -4,20 +4,29 @@ import { useEffect, useState } from 'react';
 import styles from "./navlink.module.css"
 
 /**/
+interface navlink {
+    text:  string, 
+    link:  string
+}
+type Props = {
+    to: string, 
+    children : string, 
+    items: navlink[], 
+    current: string, 
+}
 
-
-const Navlink = ({to, children, items, current}) => {
+const Navlink = ({to, children, items, current}: Props) => {
 
     const [classDivLink, setClassDivLink] = useState("notdropped")
     const [active , setActive] = useState(false)
 
-    const droppedHandler = (e) => {
+    const droppedHandler = (e: any) => {
 
         e.preventDefault()
         if (items) setClassDivLink("dropped")
     }
 
-    const outDiv = (e) =>{
+    const outDiv = (e: any) =>{
         e.preventDefault()
         setClassDivLink("notdropped")
     }

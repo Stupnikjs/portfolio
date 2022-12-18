@@ -1,0 +1,13 @@
+.main-experience{
+    padding: 10%;
+}
+
+.section-experience-asten{
+    .photo-div{
+        img{
+            width: 50%;
+            height: auto; 
+            object-fit: cover; 
+        }
+    }
+}

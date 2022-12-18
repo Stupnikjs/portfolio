@@ -1,27 +1,20 @@
 import React from 'react';
-import { useRef } from 'react';
-import PP from './PP';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faNodeJs, faJs, faCss3, faHtml5, faReact } from '@fortawesome/free-brands-svg-icons';
 import { faBriefcase, faBuildingColumns, faGlobe, faPerson } from '@fortawesome/free-solid-svg-icons';
 import Image from 'next/image';
-import drapeauFr from "../../public/images/France.png"
-import drapeauEn from "../../public/images/anglais.png"
-import drapeauEs from "../../public/images/espagne.png"
+import drapeauFr from "../public/images/France.png"
+import drapeauEn from "../public/images/anglais.png"
+import drapeauEs from "../public/images/espagne.png"
 import Link from 'next/link';
 
 
 
 const Cv = () => {
 
-
-   
-    
-
     return (
         <div  className='cv shadow-slate-500 bg-slate-300'  >
            <aside>
-            <PP></PP>
             <div className='contact'>
                 <h2>Nicolas Boudier</h2>
                 <p> Née le 21/11/1990 au Mans </p>
