@@ -1,16 +1,16 @@
 import React from 'react';
-import Navbar from './NavbarFade';
-import Logo from '../components/Logo';
+import Navbar from './Navbar';
+import style from "./navbar.module.css"
+
 
 
 
 
 const Headeur = ({scrolled}) => {
     return (
-        <div  className={scrolled ? "navandcontact scrolled" : "navandcontact"}>
-                    <Logo></Logo>
+        <header  className={scrolled ? style.header : style.header_scrolled}>
                     <Navbar ></Navbar>
-        </div>
+        </header>
     );
 };
 

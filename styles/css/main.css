@@ -1,0 +1,12 @@
+:root{
+    /*colors */
+    --mainColor : grey; 
+    --mainFontColor: white; 
+    
+    }
+    
+
+
+html, body{
+    margin: 0; 
+}

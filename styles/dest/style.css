@@ -1,0 +1,27 @@
+:root{
+    /*colors */
+    --mainColor : grey; 
+    --mainFontColor: white; 
+    
+    }
+    
+
+
+html, body{
+    margin: 0; 
+}
+    
+
+
+.main_index{
+    padding: 10%;
+}
+    
+
+
+.contact_button{
+    padding: 2%;
+    border-radius: 20px;
+}
+
+

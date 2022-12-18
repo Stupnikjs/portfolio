@@ -7,8 +7,8 @@ import { faTwitter, faGithub, faLinkedin } from '@fortawesome/free-brands-svg-ic
 import photoAsten from "../public/images/asten-avocats.png"; 
 import photoAsten2 from "../public/images/main-asten.png"; 
 import photoPharmacie from '../public/images/pharmacie.jpg'
-import Vertical from './layout/Vertical';
-import LinkShape from './components/LinkShape';
+
+import LinkShape from '../components/LinkShape';
 
 
 const Experience = () => {
