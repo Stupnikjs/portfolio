@@ -1,8 +1,55 @@
-.main_index{
-    padding: 10%;
+@keyframes shadow {
+    0% {
+        box-shadow: 0.3em 0.3em 0.5em black ; 
+    }
+    100% {
+        box-shadow: 0.6em 0.6em 0.7em black ; 
+    }
 }
 
-.contact_button{
-    padding: 2%;
-    border-radius: 20px;
+@keyframes reverse-shadow {
+    0%  { box-shadow: 0.6em 0.6em 0.7em black ; 
+       
 }
+    100% {
+        box-shadow: 0.3em 0.3em 0.5em black ;   
+    }
+}
+
+
+
+
+.main-container{
+    display: flex; 
+    
+}
+
+.left-side{
+
+    display: flex; 
+    flex-direction: column; 
+    width: 20%; 
+}
+
+.cards-div{
+    width: 100% ; 
+    display: flex; 
+    flex-wrap: wrap; 
+}
+
+.index-card{
+    width: fit-content; 
+    margin: 5%; 
+    border: 1px solid black; 
+    padding : 2%; 
+    box-shadow: 0.3em 0.3em 0.5em black ; 
+    animation: reverse-shadow 1s ;
+   
+}
+
+.index-card:hover{
+     
+     
+    animation: shadow 1s forwards; 
+}
+

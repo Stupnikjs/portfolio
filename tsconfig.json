@@ -23,7 +23,7 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx"
-  ],
+, "components/Prolink.tsx", "components/Prolink.tsx"  ],
   "exclude": [
     "node_modules"
   ]
