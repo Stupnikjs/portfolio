@@ -5,14 +5,26 @@ from __future__ import annotations
 import csv
 import io
 import re
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .prices import historical_price_eur
-from .registry import AssetRegistry
-from .schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..prices import historical_price_eur
+from ..registry import AssetRegistry
+from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 _AMOUNT_RE = re.compile(r"^([0-9.]+)([A-Za-z]+)$")
+
+def _synthetic_id(prefix: str, *parts: str) -> str:
+    """ID stable et déterministe pour le dédoublonnage, calculé sur les
+    champs bruts du CSV. Recalculer le même hash sur les mêmes données
+    d'export (même si téléchargées deux fois, périodes qui se chevauchent)
+    donne toujours le même external_id -- ça permet de détecter les
+    doublons lors du merge dans wallet.json.
+    """
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}-{digest}"
+ 
 
 def _split_amount(raw: str) -> tuple[float, str]:
     """Sépare une cellule collée '<nombre><symbole>' (format Trade History)."""
@@ -79,7 +91,11 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         quote_currency = _normalize_currency(quote_symbol) or quote_symbol
         eur_price = historical_price_eur(base_symbol, time)
-
+        value_eur = base_qty * eur_price
+        trade_id = _synthetic_id(
+            "binance-trade", row["Time"], row["Pair"], row["Side"],
+            row["Price"], row["Executed"], row["Amount"],
+        )
         out.append(Transaction(
             platform=Platform.BINANCE,
             account_label="Spot",
@@ -90,7 +106,8 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             amount=quote_amount,
             quote_currency=quote_currency,
             time=time,
-            external_id=None,
+            value_eur=value_eur,
+            external_id=trade_id,
             remark=None,
             source_file=source_file,
         ))
@@ -101,6 +118,10 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
                 fee_symbol, fee_symbol, _asset_kind_for(fee_symbol),
                 fee_ref_currency, AssetIdentifiers(),
             )
+            # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
+            fee_price_eur = historical_price_eur(fee_symbol, time)
+            fee_value_eur = fee_amount * fee_price_eur
+            
             out.append(Transaction(
                 platform=Platform.BINANCE,
                 account_label="Spot",
@@ -111,6 +132,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
                 amount=None,
                 quote_currency=None,
                 time=time,
+                value_eur=fee_value_eur,
                 external_id=None,
                 remark=f"Fee on {row['Side']} {base_symbol}",
                 source_file=source_file,
@@ -148,8 +170,13 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         sell_price_eur = historical_price_eur(sell_symbol, time)
         buy_price_eur = historical_price_eur(buy_symbol, time)
-        convert_value_eur = sell_qty * sell_price_eur
+        buy_value_eur = buy_qty * buy_price_eur
+        sell_value_eur = sell_qty * sell_price_eur
 
+        convert_id = _synthetic_id(
+            "binance-convert", row["Time"], row["Wallet"], row["Pair"],
+            row["Sell"], row["Buy"], row["Price"],
+        )
         out.append(Transaction(
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
@@ -157,10 +184,11 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             asset_id=sell_asset_id,
             quantity=sell_qty,
             price=sell_price_eur,
-            amount=convert_value_eur,
+            amount=sell_value_eur,
+            value_eur=sell_value_eur,
             quote_currency="EUR",
             time=time,
-            external_id=None,
+            external_id=f"{convert_id}-sell",
             remark="Convert",
             source_file=source_file,
         ))
@@ -171,10 +199,11 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             asset_id=buy_asset_id,
             quantity=buy_qty,
             price=buy_price_eur,
-            amount=convert_value_eur,
+            amount=buy_value_eur,
+            value_eur=buy_value_eur,
             quote_currency="EUR",
             time=time,
-            external_id=None,
+            external_id=f"{convert_id}-buy",
             remark="Convert",
             source_file=source_file,
         ))

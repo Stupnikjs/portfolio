@@ -1,8 +1,125 @@
 
 ################################################################################
 # Dossier : src
+# Fichier : main.py
+# Chemin relatif : main.py
+################################################################################
+
+"""
+Script de test réel pour les parsers Binance et XTB.
+Lit tes vrais fichiers de données et affiche le résultat.
+"""
+import os
+from pathlib import Path
+from datetime import datetime
+
+# Imports relatifs de ton projet
+from .parse import binance, xtb
+from .registry import AssetRegistry
+from .schema import Transaction
+from . import prices
+
+DATA_DIR = "./data/raw" 
+
+def print_transactions(title: str, transactions: list[Transaction]):
+    print(f"\n{'='*60}")
+    print(f" {title} ({len(transactions)} transactions) ")
+    print(f"{'='*60}")
+    for tx in transactions:
+        print(f"  [{tx.time.strftime('%Y-%m-%d')}] {tx.kind.value.upper():<5} | {tx.quantity:<8} {tx.asset_id:<3} | Prix: {tx.price} EUR | Fichier: {os.path.basename(tx.source_file)}")
+
+def main():
+    print("=== DÉMARRAGE DU TEST DES PARSERS ===")
+    
+    # 1. Chemins vers tes vrais fichiers
+    binance_trades = Path(DATA_DIR, "trades.csv")
+    binance_converts = Path(DATA_DIR, "convert.csv")
+    xtb_file = Path(DATA_DIR, "account.xlsx")
+    xtb_pea_file = Path(DATA_DIR, "account_pea.xlsx")
+    
+    # 2. Initialiser le registre
+    registry = AssetRegistry()
+    
+    # 3. Tester Binance (on vérifie si les fichiers existent avant de lancer)
+    if binance_trades.exists():
+        print("\nLecture des Trades Binance...")
+        tx_trades = binance.parse_trades(binance_trades, registry)
+        print_transactions("BINANCE - TRADES", tx_trades)
+    else:
+        print(f"\n[Omis] Fichier introuvable : {binance_trades}")
+        
+    if binance_converts.exists():
+        print("\nLecture des Converts Binance...")
+        tx_converts = binance.parse_converts(binance_converts, registry)
+        print_transactions("BINANCE - CONVERTS", tx_converts)
+    else:
+        print(f"\n[Omis] Fichier introuvable : {binance_converts}")
+    
+    # 4. Tester XTB
+    if xtb_file.exists():
+        print("\nLecture des positions XTB...")
+        try:
+            closed_sheet = xtb.find_sheet_by_prefix(xtb_file, "CLOSED POSITION HISTORY")
+            tx_closed = xtb.parse_closed_positions(xtb_file, closed_sheet)
+            tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
+            print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Closed] {e}")
+
+        try:
+            open_sheet = xtb.find_sheet_by_prefix(xtb_file, "OPEN POSITION 29072026")
+            tx_open = xtb.parse_open_positions(xtb_file, open_sheet)
+            tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
+            print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Open] {e}")
+    else:
+        print(f"\n[Omis] Fichier introuvable : {xtb_file}")
+    # 4. Tester XTB
+    if xtb_pea_file.exists():
+        print("\nLecture des positions XTB...")
+        try:
+            closed_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "CLOSED POSITION HISTORY")
+            tx_closed = xtb.parse_closed_positions(xtb_pea_file, closed_sheet)
+            tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
+            print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Closed] {e}")
+
+        try:
+            open_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "OPEN POSITION 29072026")
+            tx_open = xtb.parse_open_positions(xtb_pea_file, open_sheet)
+            tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
+            print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Open] {e}")
+    else:
+        print(f"\n[Omis] Fichier introuvable : {xtb_pea_file}")
+    
+    # 5. Afficher le registre final
+    print(f"\n{'='*60}")
+    print(f" REGISTRE D'ACTIFS CRÉÉ ")
+    print(f"{'='*60}")
+    for asset in registry.get_all_assets():
+        print(f"  ID: {asset.id:<2} | Symbole: {asset.symbol:<10} | Type: {asset.kind.value}")
+    
+    print("\nTest terminé !")
+
+if __name__ == "__main__":
+    main()
+
+################################################################################
+# Dossier : src/parse
+# Fichier : __init__.py
+# Chemin relatif : parse/__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src/parse
 # Fichier : binance.py
-# Chemin relatif : binance.py
+# Chemin relatif : parse/binance.py
 ################################################################################
 
 """Équivalent Python de pf_extract::binance (parse_trades, parse_converts)."""
@@ -12,15 +129,26 @@ from __future__ import annotations
 import csv
 import io
 import re
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .price import historical_price_eur
-from .registry import AssetRegistry
-from .types import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..prices import historical_price_eur
+from ..registry import AssetRegistry
+from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 _AMOUNT_RE = re.compile(r"^([0-9.]+)([A-Za-z]+)$")
 
+def _synthetic_id(prefix: str, *parts: str) -> str:
+    """ID stable et déterministe pour le dédoublonnage, calculé sur les
+    champs bruts du CSV. Recalculer le même hash sur les mêmes données
+    d'export (même si téléchargées deux fois, périodes qui se chevauchent)
+    donne toujours le même external_id -- ça permet de détecter les
+    doublons lors du merge dans wallet.json.
+    """
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}-{digest}"
+ 
 
 def _split_amount(raw: str) -> tuple[float, str]:
     """Sépare une cellule collée '<nombre><symbole>' (format Trade History)."""
@@ -87,7 +215,11 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         quote_currency = _normalize_currency(quote_symbol) or quote_symbol
         eur_price = historical_price_eur(base_symbol, time)
-
+        value_eur = base_qty * eur_price
+        trade_id = _synthetic_id(
+            "binance-trade", row["Time"], row["Pair"], row["Side"],
+            row["Price"], row["Executed"], row["Amount"],
+        )
         out.append(Transaction(
             platform=Platform.BINANCE,
             account_label="Spot",
@@ -98,7 +230,8 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             amount=quote_amount,
             quote_currency=quote_currency,
             time=time,
-            external_id=None,
+            value_eur=value_eur,
+            external_id=trade_id,
             remark=None,
             source_file=source_file,
         ))
@@ -109,6 +242,10 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
                 fee_symbol, fee_symbol, _asset_kind_for(fee_symbol),
                 fee_ref_currency, AssetIdentifiers(),
             )
+            # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
+            fee_price_eur = historical_price_eur(fee_symbol, time)
+            fee_value_eur = fee_amount * fee_price_eur
+            
             out.append(Transaction(
                 platform=Platform.BINANCE,
                 account_label="Spot",
@@ -119,6 +256,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
                 amount=None,
                 quote_currency=None,
                 time=time,
+                value_eur=fee_value_eur,
                 external_id=None,
                 remark=f"Fee on {row['Side']} {base_symbol}",
                 source_file=source_file,
@@ -156,8 +294,13 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         sell_price_eur = historical_price_eur(sell_symbol, time)
         buy_price_eur = historical_price_eur(buy_symbol, time)
-        convert_value_eur = sell_qty * sell_price_eur
+        buy_value_eur = buy_qty * buy_price_eur
+        sell_value_eur = sell_qty * sell_price_eur
 
+        convert_id = _synthetic_id(
+            "binance-convert", row["Time"], row["Wallet"], row["Pair"],
+            row["Sell"], row["Buy"], row["Price"],
+        )
         out.append(Transaction(
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
@@ -165,10 +308,11 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             asset_id=sell_asset_id,
             quantity=sell_qty,
             price=sell_price_eur,
-            amount=convert_value_eur,
+            amount=sell_value_eur,
+            value_eur=sell_value_eur,
             quote_currency="EUR",
             time=time,
-            external_id=None,
+            external_id=f"{convert_id}-sell",
             remark="Convert",
             source_file=source_file,
         ))
@@ -179,10 +323,11 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             asset_id=buy_asset_id,
             quantity=buy_qty,
             price=buy_price_eur,
-            amount=convert_value_eur,
+            amount=buy_value_eur,
+            value_eur=buy_value_eur,
             quote_currency="EUR",
             time=time,
-            external_id=None,
+            external_id=f"{convert_id}-buy",
             remark="Convert",
             source_file=source_file,
         ))
@@ -190,279 +335,12 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
     return out
 
 ################################################################################
-# Dossier : src
-# Fichier : main.py
-# Chemin relatif : main.py
-################################################################################
-
-"""
-Script de test réel pour les parsers Binance et XTB.
-Génère de faux exports, lance le parsing, et affiche le résultat.
-"""
-import csv
-import os
-import shutil
-from pathlib import Path
-from datetime import datetime, timezone
-
-import openpyxl
-
-# Imports relatifs de ton projet
-from .registry import AssetRegistry
-from .types import Transaction, Asset
-from . import binance, xtb, prices
-
-
-
-def print_transactions(title: str, transactions: list[Transaction]):
-    print(f"\n{'='*60}")
-    print(f" {title} ({len(transactions)} transactions) ")
-    print(f"{'='*60}")
-    for tx in transactions:
-        print(f"  [{tx.time.strftime('%Y-%m-%d')}] {tx.kind.value.upper():<5} | {tx.quantity:<8} {tx.asset_id:<3} | Prix: {tx.price} EUR | Fichier: {os.path.basename(tx.source_file)}")
-
-def main():
-    print("=== DÉMARRAGE DU TEST DES PARSERS ===")
-    
-    # 1. Générer les fausses données
-    print("Génération des fichiers de test...")
-    binance_trades, binance_converts = ("./data/trades.csv", "./data/convert.csv")
-    xtb_file = "account.xlsx"
-    
-    # 2. Initialiser le registre
-    registry = AssetRegistry()
-    
-    # 3. Tester Binance
-    print("\nLecture des Trades Binance...")
-    tx_trades = binance.parse_trades(binance_trades, registry)
-    print_transactions("BINANCE - TRADES", tx_trades)
-    
-    print("\nLecture des Converts Binance...")
-    tx_converts = binance.parse_converts(binance_converts, registry)
-    print_transactions("BINANCE - CONVERTS", tx_converts)
-    
-    # 4. Tester XTB
-    print("\nLecture des positions XTB...")
-    closed_sheet = xtb.find_sheet_by_prefix(xtb_file, "Closed Position")
-    tx_closed = xtb.parse_closed_positions(xtb_file, closed_sheet)
-    tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
-    print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
-    
-    open_sheet = xtb.find_sheet_by_prefix(xtb_file, "OPEN POSITION")
-    tx_open = xtb.parse_open_positions(xtb_file, open_sheet)
-    tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
-    print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
-    
-    # 5. Afficher le registre final
-    print(f"\n{'='*60}")
-    print(f" REGISTRE D'ACTIFS CRÉÉ ")
-    print(f"{'='*60}")
-    for asset in registry.get_all_assets():
-        print(f"  ID: {asset.id:<2} | Symbole: {asset.symbol:<10} | Type: {asset.kind.value}")
-    
-    # Nettoyage (optionnel, commente pour garder les fichiers)
-    shutil.rmtree("./data")
-    print("\nFichiers de test supprimés. Test terminé avec succès !")
-
-if __name__ == "__main__":
-    main()
-
-################################################################################
-# Dossier : src
-# Fichier : price.py
-# Chemin relatif : price.py
-################################################################################
-
-"""Équivalent Python de pf_price::historical_price_eur.
-
-Le crate `pf-price` n'était PAS dans l'archive fournie -- ce module est une
-implémentation de remplacement basée sur l'API publique CoinGecko (gratuite,
-sans clé), avec un cache mémoire pour éviter de refaire deux fois le même
-appel. Remplace `historical_price_eur` par ta propre logique si tu as déjà
-un module de prix équivalent (ou complète `_COINGECKO_IDS` selon tes actifs).
-"""
-
-from __future__ import annotations
-
-from datetime import datetime
-from functools import lru_cache
-
-import requests
-
-# Mapping symbole -> id CoinGecko. À compléter selon les actifs que tu détiens.
-_COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-}
-
-_FIAT = {"EUR", "USD", "GBP"}
-
-
-class PriceError(RuntimeError):
-    pass
-
-
-@lru_cache(maxsize=4096)
-def _coingecko_price_eur(coingecko_id: str, date_str: str) -> float:
-    resp = requests.get(
-        f"https://api.coingecko.com/api/v3/coins/{coingecko_id}/history",
-        params={"date": date_str, "localization": "false"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    try:
-        return float(data["market_data"]["current_price"]["eur"])
-    except (KeyError, TypeError) as exc:
-        raise PriceError(f"pas de prix EUR pour {coingecko_id} au {date_str}") from exc
-
-
-def historical_price_eur(symbol: str, time: datetime) -> float:
-    """Retourne le prix en EUR de `symbol` à la date `time`.
-
-    - EUR -> 1.0.
-    - Autres devises fiat (USD, GBP...) : non converties ici, à compléter
-      avec un taux de change si besoin.
-    - Cryptos listées dans `_COINGECKO_IDS` : requête CoinGecko `history`
-      (résolution journalière -- CoinGecko ne donne pas le prix intraday
-      sur l'API gratuite).
-    """
-    symbol = symbol.upper()
-
-    if symbol == "EUR":
-        return 1.0
-    if symbol in _FIAT:
-        raise PriceError(
-            f"conversion {symbol}->EUR non implémentée, ajoute un taux de change"
-        )
-
-    coingecko_id = _COINGECKO_IDS.get(symbol)
-    if coingecko_id is None:
-        raise PriceError(f"symbole crypto inconnu dans _COINGECKO_IDS: {symbol}")
-
-    date_str = time.strftime("%d-%m-%Y")
-    return _coingecko_price_eur(coingecko_id, date_str)
-
-################################################################################
-# Dossier : src
-# Fichier : registry.py
-# Chemin relatif : registry.py
-################################################################################
-
-from .types import Asset, AssetIdentifiers, AssetKind
-from typing import Dict
-
-class AssetRegistry:
-    def __init__(self):
-        self._assets: Dict[int, Asset] = {}
-        self._symbol_to_id: Dict[str, int] = {}
-        self._next_id = 1
-
-    def find_or_create(self, symbol: str, name: str, kind: AssetKind, ref_currency: str, identifiers: AssetIdentifiers) -> int:
-        if symbol in self._symbol_to_id:
-            return self._symbol_to_id[symbol]
-        
-        asset_id = self._next_id
-        self._assets[asset_id] = Asset(
-            id=asset_id, symbol=symbol, name=name, kind=kind, 
-            ref_currency=ref_currency, identifiers=identifiers
-        )
-        self._symbol_to_id[symbol] = asset_id
-        self._next_id += 1
-        return asset_id
-
-    def get_all_assets(self):
-        return list(self._assets.values())
-
-################################################################################
-# Dossier : src
-# Fichier : types.py
-# Chemin relatif : types.py
-################################################################################
-
-"""Types de base, équivalent Python du crate pf-core.
-
-Le crate `pf-core` n'était PAS inclus dans l'archive fournie (seul `pf-extract`,
-c.-à-d. binance.rs/xtb.rs, y était). Les types ci-dessous sont reconstruits à
-partir de ce qui est utilisé dans ces deux fichiers. Si ta vraie définition
-Rust de `AssetIdentifiers` ou `Transaction` a d'autres champs, ajuste ici.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Optional
-
-
-class Platform(str, Enum):
-    BINANCE = "Binance"
-    XTB = "Xtb"
-
-
-class TransactionKind(str, Enum):
-    BUY = "Buy"
-    SELL = "Sell"
-    FEE = "Fee"
-
-
-class AssetKind(str, Enum):
-    CASH = "Cash"
-    CRYPTO = "Crypto"
-    STOCK = "Stock"
-
-
-@dataclass
-class AssetIdentifiers:
-    """Identifiants externes optionnels d'un actif (ISIN, ticker...).
-    `AssetIdentifiers::default()` en Rust ne montre pas les champs réels --
-    complète cette classe si ta version en a d'autres (ISIN, CUSIP, etc.)."""
-
-    isin: Optional[str] = None
-    ticker: Optional[str] = None
-
-
-@dataclass
-class Asset:
-    id: int
-    symbol: str
-    name: str
-    kind: AssetKind
-    ref_currency: str
-    identifiers: AssetIdentifiers
-
-
-@dataclass
-class Transaction:
-    platform: Platform
-    account_label: str
-    kind: TransactionKind
-    asset_id: int
-    quantity: float
-    price: Optional[float]
-    amount: Optional[float]
-    quote_currency: Optional[str]
-    time: datetime
-    external_id: Optional[str]
-    remark: Optional[str]
-    source_file: str
-
-################################################################################
-# Dossier : src
+# Dossier : src/parse
 # Fichier : xtb.py
-# Chemin relatif : xtb.py
+# Chemin relatif : parse/xtb.py
 ################################################################################
 
-"""Équivalent Python de pf_extract::xtb (positions ouvertes/fermées XTB).
-
-Utilise `openpyxl` comme équivalent de `calamine`. Comme `calamine` avec
-`features = ["dates"]`, openpyxl convertit déjà les cellules date Excel en
-`datetime` Python -- le fallback texte ('%d/%m/%Y %H:%M:%S') couvre les cas
-où la cellule est stockée en chaîne.
-"""
+"""Équivalent Python de pf_extract::xtb (positions ouvertes/fermées XTB)."""
 
 from __future__ import annotations
 
@@ -473,8 +351,8 @@ from typing import Optional
 
 import openpyxl
 
-from .registry import AssetRegistry
-from .types import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..registry import AssetRegistry
+from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
 @dataclass
@@ -510,12 +388,14 @@ class XtbClosedPosition:
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
                 asset_id=asset_id, quantity=self.volume, price=self.open_price,
                 amount=self.purchase_value, quote_currency=None, time=self.open_time,
+                value_eur=self.purchase_value,
                 external_id=self.position_id, remark=None, source_file=self.source_file,
             ),
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.SELL,
                 asset_id=asset_id, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
+                value_eur=self.sale_value,
                 external_id=self.position_id, remark=None, source_file=self.source_file,
             ),
         ]
@@ -550,6 +430,7 @@ class XtbOpenPosition:
             platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
             asset_id=asset_id, quantity=self.volume, price=self.open_price,
             amount=self.purchase_value, quote_currency=None, time=self.open_time,
+            value_eur=self.purchase_value,
             external_id=self.position_id, remark=self.comment, source_file=self.source_file,
         )
 
@@ -601,42 +482,51 @@ def _cell_datetime(value) -> datetime:
 
 
 def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPosition]:
-    """Parse l'onglet 'Closed Position History' d'un export XTB xlsx."""
+    """Parse l'onglet 'Closed Position History' d'un export XTB xlsx.
+
+    NB: pas de `read_only=True` ici -- openpyxl s'appuie en mode read_only sur
+    la balise `<dimension>` du XML pour savoir quelle plage lire, et les
+    exports XTB ont cette balise absente/incorrecte (symptôme observé :
+    iter_rows ne renvoie que des tuples vides). Le mode normal l'ignore et lit
+    vraiment la feuille.
+    """
     source_file = str(path)
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
     try:
         sheet = wb[sheet_name]
-        rows = sheet.iter_rows(values_only=True)
-        next(rows, None)  # en-tête
         out: list[XtbClosedPosition] = []
 
-        for row in rows:
-            position_id = _cell_f64(row[0])
+        # Pas de `next(rows, None)` pour sauter un en-tête fixe : les exports
+        # XTB ont un nombre variable de lignes de titre/résumé de compte
+        # au-dessus du vrai tableau (colonne A vide -> décalage d'index +1
+        # sur toutes les colonnes). On ignore simplement toute ligne dont la
+        # colonne "Position" (row[1]) n'est pas un nombre -- ça élimine à la
+        # fois les lignes de titre, la ligne d'en-tête et la ligne "Total".
+        for row in sheet.iter_rows(values_only=True):
+            position_id = _cell_f64(row[1])
             if position_id is None:
-                continue
-            if position_id == 0.0 and row[1] is None:
                 continue
 
             out.append(XtbClosedPosition(
                 position_id=str(int(position_id)),
-                symbol=_cell_str(row[1]),
-                side=_cell_str(row[2]),
-                volume=_cell_f64(row[3]) or 0.0,
-                open_time=_cell_datetime(row[4]),
-                open_price=_cell_f64(row[5]) or 0.0,
-                close_time=_cell_datetime(row[6]),
-                close_price=_cell_f64(row[7]) or 0.0,
-                open_origin=_cell_str(row[8]),
-                close_origin=_cell_str(row[9]),
-                purchase_value=_cell_f64(row[10]) or 0.0,
-                sale_value=_cell_f64(row[11]) or 0.0,
-                sl=_cell_f64(row[12]),
-                tp=_cell_f64(row[13]),
-                margin=_cell_f64(row[14]),
-                commission=_cell_f64(row[15]) or 0.0,
-                swap=_cell_f64(row[16]) or 0.0,
-                rollover=_cell_f64(row[17]) or 0.0,
-                gross_pl=_cell_f64(row[18]) or 0.0,
+                symbol=_cell_str(row[2]),
+                side=_cell_str(row[3]),
+                volume=_cell_f64(row[4]) or 0.0,
+                open_time=_cell_datetime(row[5]),
+                open_price=_cell_f64(row[6]) or 0.0,
+                close_time=_cell_datetime(row[7]),
+                close_price=_cell_f64(row[8]) or 0.0,
+                open_origin=_cell_str(row[9]),
+                close_origin=_cell_str(row[10]),
+                purchase_value=_cell_f64(row[11]) or 0.0,
+                sale_value=_cell_f64(row[12]) or 0.0,
+                sl=_cell_f64(row[13]),
+                tp=_cell_f64(row[14]),
+                margin=_cell_f64(row[15]),
+                commission=_cell_f64(row[16]) or 0.0,
+                swap=_cell_f64(row[17]) or 0.0,
+                rollover=_cell_f64(row[18]) or 0.0,
+                gross_pl=_cell_f64(row[19]) or 0.0,
                 source_file=source_file,
             ))
         return out
@@ -648,9 +538,11 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
     """Parse l'onglet 'OPEN POSITION <date>' d'un export XTB xlsx.
     Le nom de l'onglet inclut une date qui change à chaque export
     (ex: 'OPEN POSITION 29072026'), donc `sheet_name` doit être fourni exactement.
+
+    Voir la note dans `parse_closed_positions` : pas de `read_only=True`.
     """
     source_file = str(path)
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
     try:
         sheet = wb[sheet_name]
         rows = sheet.iter_rows(values_only=True)
@@ -689,3 +581,221 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
         return out
     finally:
         wb.close()
+
+################################################################################
+# Dossier : src
+# Fichier : prices.py
+# Chemin relatif : prices.py
+################################################################################
+
+"""Équivalent Python de pf_price::historical_price_eur.
+Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide, 
+aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
+"""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from functools import lru_cache
+
+import requests
+
+# L'endpoint public de Binance pour les données de marché (évite les blocages régionaux)
+_BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
+
+
+class PriceError(RuntimeError):
+    pass
+
+
+@lru_cache(maxsize=4096)
+def _binance_klines(symbol_pair: str, day_str: str) -> list:
+    """Récupère la bougie journalière (klines) pour une paire donnée.
+    day_str au format YYYY-MM-DD."""
+    # On convertit la date en timestamp millisecondes (début de journée UTC)
+    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start_ms = int(dt.timestamp() * 1000)
+    
+    # On introduit un tout petit délai (0.1s) pour être poli avec l'API
+    time.sleep(0.1)
+    
+    resp = requests.get(
+        _BINANCE_API,
+        params={
+            "symbol": symbol_pair,
+            "interval": "1d",  # Bougie journalière
+            "startTime": start_ms,
+            "limit": 1         # On ne veut que la bougie de ce jour précis
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_price_from_binance(symbol: str, time: datetime) -> float:
+    """Tente de récupérer le prix via Binance. 
+    Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
+    day_str = time.strftime("%Y-%m-%d")
+    
+    # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
+    try:
+        data = _binance_klines(f"{symbol}EUR", day_str)
+        if data and len(data) > 0:
+            # data[0] = bougie du jour. Index 4 = prix de clôture (Close price)
+            return float(data[0][4])
+    except requests.exceptions.HTTPError as e:
+        # Si l'erreur est 400 (Bad Request), ça veut dire que la paire EUR n'existe pas
+        # Si c'est une autre erreur (réseau, 429), on lève l'exception
+        if e.response.status_code != 400:
+            raise PriceError(f"API Binance KO pour {symbol}EUR") from e
+
+    # Tentative 2 : Fallback sur la paire USDT (ex: LINKUSDT) + conversion EUR
+    try:
+        usdt_data = _binance_klines(f"{symbol}USDT", day_str)
+        eurusdt_data = _binance_klines("EURUSDT", day_str)
+        
+        if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
+            price_usdt = float(usdt_data[0][4])
+            eurusdt_rate = float(eurusdt_data[0][4])
+            if eurusdt_rate > 0:
+                return price_usdt / eurusdt_rate
+    except Exception as e:
+        raise PriceError(f"Pas de prix USDT/EUR pour {symbol}") from e
+
+    raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
+
+
+def historical_price_eur(symbol: str, time: datetime) -> float:
+    """Retourne le prix en EUR de `symbol` à la date `time`."""
+    symbol = symbol.upper()
+
+    # Gestion des devises fiat et stablecoins
+    if symbol in ("EUR", "EURI"):
+        return 1.0
+    if symbol in ("USD", "USDT", "USDC", "BUSD"):
+        # On pourrait appeler l'API pour le taux exact, mais un fixe suffit pour les tests
+        return 0.92
+    if symbol in ("GBP",):
+        return 1.15
+
+    # Assurer que la datetime a un fuseau horaire (Binance travaille en UTC)
+    if time.tzinfo is None:
+        time = time.replace(tzinfo=timezone.utc)
+
+    try:
+        return _get_price_from_binance(symbol, time)
+    except PriceError:
+        # Si jamais l'API bloque ou la crypto n'existe pas à cette date
+        day_str = time.strftime("%Y-%m-%d")
+        print(f"  [WARN] Prix indisponible pour {symbol} au {day_str}. Prix mis à 0.")
+        return 0.0
+
+################################################################################
+# Dossier : src
+# Fichier : registry.py
+# Chemin relatif : registry.py
+################################################################################
+
+from .schema import Asset, AssetIdentifiers, AssetKind
+from typing import Dict
+
+class AssetRegistry:
+    def __init__(self):
+        self._assets: Dict[int, Asset] = {}
+        self._symbol_to_id: Dict[str, int] = {}
+        self._next_id = 1
+
+    def find_or_create(self, symbol: str, name: str, kind: AssetKind, ref_currency: str, identifiers: AssetIdentifiers) -> int:
+        if symbol in self._symbol_to_id:
+            return self._symbol_to_id[symbol]
+        
+        asset_id = self._next_id
+        self._assets[asset_id] = Asset(
+            id=asset_id, symbol=symbol, name=name, kind=kind, 
+            ref_currency=ref_currency, identifiers=identifiers
+        )
+        self._symbol_to_id[symbol] = asset_id
+        self._next_id += 1
+        return asset_id
+
+    def get_all_assets(self):
+        return list(self._assets.values())
+
+################################################################################
+# Dossier : src
+# Fichier : schema.py
+# Chemin relatif : schema.py
+################################################################################
+
+"""Types de base, équivalent Python du crate pf-core.
+
+Le crate `pf-core` n'était PAS inclus dans l'archive fournie (seul `pf-extract`,
+c.-à-d. binance.rs/xtb.rs, y était). Les types ci-dessous sont reconstruits à
+partir de ce qui est utilisé dans ces deux fichiers. Si ta vraie définition
+Rust de `AssetIdentifiers` ou `Transaction` a d'autres champs, ajuste ici.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+
+class Platform(str, Enum):
+    BINANCE = "Binance"
+    XTB = "Xtb"
+
+
+class TransactionKind(str, Enum):
+    BUY = "Buy"
+    SELL = "Sell"
+    FEE = "Fee"
+    DEPOSITE = "Deposit"
+    WITHDRAW = "Withdraw"
+
+
+class AssetKind(str, Enum):
+    CASH = "Cash"
+    CRYPTO = "Crypto"
+    STOCK = "Stock"
+
+
+@dataclass
+class AssetIdentifiers:
+    """Identifiants externes optionnels d'un actif (ISIN, ticker...).
+    `AssetIdentifiers::default()` en Rust ne montre pas les champs réels --
+    complète cette classe si ta version en a d'autres (ISIN, CUSIP, etc.)."""
+
+    isin: Optional[str] = None
+    ticker: Optional[str] = None
+
+
+@dataclass
+class Asset:
+    id: int
+    symbol: str
+    name: str
+    kind: AssetKind
+    ref_currency: str
+    identifiers: AssetIdentifiers
+
+
+@dataclass
+class Transaction:
+    platform: Platform
+    account_label: str
+    kind: TransactionKind
+    asset_id: int
+    quantity: float
+    price: Optional[float]
+    value_eur: float # immutable 
+    amount: Optional[float]
+    quote_currency: Optional[str]
+    time: datetime
+    external_id: Optional[str]
+    remark: Optional[str]
+    source_file: str

@@ -23,6 +23,8 @@ class TransactionKind(str, Enum):
     BUY = "Buy"
     SELL = "Sell"
     FEE = "Fee"
+    DEPOSITE = "Deposit"
+    WITHDRAW = "Withdraw"
 
 
 class AssetKind(str, Enum):
@@ -59,6 +61,7 @@ class Transaction:
     asset_id: int
     quantity: float
     price: Optional[float]
+    value_eur: float # immutable 
     amount: Optional[float]
     quote_currency: Optional[str]
     time: datetime

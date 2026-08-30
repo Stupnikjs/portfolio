@@ -7,9 +7,12 @@ from pathlib import Path
 from datetime import datetime
 
 # Imports relatifs de ton projet
+from .parse import binance, xtb
 from .registry import AssetRegistry
 from .schema import Transaction
-from . import binance, xtb, prices
+from . import prices
+
+DATA_DIR = "./data/raw" 
 
 def print_transactions(title: str, transactions: list[Transaction]):
     print(f"\n{'='*60}")
@@ -22,9 +25,10 @@ def main():
     print("=== DÉMARRAGE DU TEST DES PARSERS ===")
     
     # 1. Chemins vers tes vrais fichiers
-    binance_trades = Path("./data/trades.csv")
-    binance_converts = Path("./data/convert.csv")
-    xtb_file = Path("./data/account.xlsx")
+    binance_trades = Path(DATA_DIR, "trades.csv")
+    binance_converts = Path(DATA_DIR, "convert.csv")
+    xtb_file = Path(DATA_DIR, "account.xlsx")
+    xtb_pea_file = Path(DATA_DIR, "account_pea.xlsx")
     
     # 2. Initialiser le registre
     registry = AssetRegistry()
@@ -64,6 +68,26 @@ def main():
             print(f"  [Erreur XTB Open] {e}")
     else:
         print(f"\n[Omis] Fichier introuvable : {xtb_file}")
+    # 4. Tester XTB
+    if xtb_pea_file.exists():
+        print("\nLecture des positions XTB...")
+        try:
+            closed_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "CLOSED POSITION HISTORY")
+            tx_closed = xtb.parse_closed_positions(xtb_pea_file, closed_sheet)
+            tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
+            print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Closed] {e}")
+
+        try:
+            open_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "OPEN POSITION 29072026")
+            tx_open = xtb.parse_open_positions(xtb_pea_file, open_sheet)
+            tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
+            print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
+        except ValueError as e:
+            print(f"  [Erreur XTB Open] {e}")
+    else:
+        print(f"\n[Omis] Fichier introuvable : {xtb_pea_file}")
     
     # 5. Afficher le registre final
     print(f"\n{'='*60}")
