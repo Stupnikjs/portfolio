@@ -47,14 +47,14 @@ class XtbClosedPosition:
                 asset_id=asset_id, quantity=self.volume, price=self.open_price,
                 amount=self.purchase_value, quote_currency=None, time=self.open_time,
                 value_eur=self.purchase_value,
-                external_id=self.position_id, remark=None, source_file=self.source_file,
+                external_id=f"{self.position_id}-buy", remark=None, source_file=self.source_file,
             ),
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.SELL,
                 asset_id=asset_id, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
-                external_id=self.position_id, remark=None, source_file=self.source_file,
+             external_id=f"{self.position_id}-sell, remark=None, source_file=self.source_file,
             ),
         ]
 
