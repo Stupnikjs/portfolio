@@ -35,9 +35,7 @@ class AssetKind(str, Enum):
 
 @dataclass
 class AssetIdentifiers:
-    """Identifiants externes optionnels d'un actif (ISIN, ticker...).
-    `AssetIdentifiers::default()` en Rust ne montre pas les champs réels --
-    complète cette classe si ta version en a d'autres (ISIN, CUSIP, etc.)."""
+    """Identifiants externes optionnels d'un actif (ISIN, ticker...)."""
 
     isin: Optional[str] = None
     ticker: Optional[str] = None

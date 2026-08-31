@@ -109,17 +109,17 @@ if __name__ == "__main__":
     main()
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : __init__.py
-# Chemin relatif : parse/__init__.py
+# Chemin relatif : parse\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : binance.py
-# Chemin relatif : parse/binance.py
+# Chemin relatif : parse\binance.py
 ################################################################################
 
 """Équivalent Python de pf_extract::binance (parse_trades, parse_converts)."""
@@ -335,9 +335,9 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
     return out
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : xtb.py
-# Chemin relatif : parse/xtb.py
+# Chemin relatif : parse\xtb.py
 ################################################################################
 
 """Équivalent Python de pf_extract::xtb (positions ouvertes/fermées XTB)."""

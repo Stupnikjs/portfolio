@@ -22,3 +22,8 @@ class AssetRegistry:
 
     def get_all_assets(self):
         return list(self._assets.values())
+
+    def get_asset(self, asset_id: int) -> Asset:
+        """Lookup par id -- nécessaire pour retrouver le symbole stable
+        d'une Transaction lors de la sérialisation vers wallet.json."""
+        return self._assets[asset_id]
