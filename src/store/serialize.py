@@ -1,14 +1,3 @@
-"""
-Persistance du wallet.json : chargement, sauvegarde et fusion des
-transactions extraites par les parsers (binance.py, xtb.py) dans un état
-durable.
-
-Point clé : wallet.json identifie les actifs par leur SYMBOLE (str), jamais
-par le asset_id (int) généré en mémoire par AssetRegistry. Ces ids ne sont
-stables que pendant un run -- l'ordre de découverte des actifs peut changer
-d'une exécution à l'autre. Le mapping symbol -> asset_id est reconstruit à
-chaque chargement via un AssetRegistry propre au Wallet.
-"""
 
 from __future__ import annotations
 
