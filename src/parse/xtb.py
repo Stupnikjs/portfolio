@@ -54,7 +54,7 @@ class XtbClosedPosition:
                 asset_id=asset_id, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
-             external_id=f"{self.position_id}-sell, remark=None, source_file=self.source_file,
+             external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
             ),
         ]
 
