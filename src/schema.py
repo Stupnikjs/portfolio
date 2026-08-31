@@ -66,3 +66,10 @@ class Transaction:
     external_id: Optional[str]
     remark: Optional[str]
     source_file: str
+
+
+def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
+    """ID stable : le même triplet (symbol, kind, ref_currency) donne
+    toujours le même id, peu importe l'ordre de parsing ou le run."""
+    digest = hashlib.sha256(f"{kind.value}|{ref_currency}|{symbol}".encode()).hexdigest()
+    return int(digest[:15], 16)  # tient dans un int 64 bits signé
