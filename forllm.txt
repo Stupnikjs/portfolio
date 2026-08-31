@@ -1,112 +1,190 @@
 
 ################################################################################
 # Dossier : src
-# Fichier : main.py
-# Chemin relatif : main.py
+# Fichier : cli.py
+# Chemin relatif : cli.py
 ################################################################################
 
 """
-Script de test réel pour les parsers Binance et XTB.
-Lit tes vrais fichiers de données et affiche le résultat.
+build_wallet.py
+
+Construit (ou met à jour) wallet.json à partir des exports bruts dans
+./data/raw/. Remplace le rôle "démo" de l'ancien main.py par une vraie
+étape de persistance : parse -> fusion dans le Wallet -> save_wallet.
+
+Ré-exécutable sans risque : le dédoublonnage par external_id (voir
+store/wallet_store.py) garantit qu'un même fichier réimporté ne crée pas
+de doublons.
 """
+
 import os
 from pathlib import Path
-from datetime import datetime
 
-# Imports relatifs de ton projet
 from .parse import binance, xtb
 from .registry import AssetRegistry
-from .schema import Transaction
-from . import prices
+from .store.serialize import Wallet, load_wallet, save_wallet
 
-DATA_DIR = "./data/raw" 
+DATA_DIR = "./data/raw"
+TX_STORE_PATH = Path("./data/tx_store.json")
 
-def print_transactions(title: str, transactions: list[Transaction]):
-    print(f"\n{'='*60}")
-    print(f" {title} ({len(transactions)} transactions) ")
-    print(f"{'='*60}")
-    for tx in transactions:
-        print(f"  [{tx.time.strftime('%Y-%m-%d')}] {tx.kind.value.upper():<5} | {tx.quantity:<8} {tx.asset_id:<3} | Prix: {tx.price} EUR | Fichier: {os.path.basename(tx.source_file)}")
+
+def _parse_binance(registry: AssetRegistry) -> list:
+    out = []
+    trades_path = Path(DATA_DIR, "trades.csv")
+    converts_path = Path(DATA_DIR, "convert.csv")
+
+    if trades_path.exists():
+        print(f"Lecture Binance Trades : {trades_path}")
+        out += binance.parse_trades(trades_path, registry)
+    else:
+        print(f"[Omis] Fichier introuvable : {trades_path}")
+
+    if converts_path.exists():
+        print(f"Lecture Binance Converts : {converts_path}")
+        out += binance.parse_converts(converts_path, registry)
+    else:
+        print(f"[Omis] Fichier introuvable : {converts_path}")
+
+    return out
+
+
+def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
+    out = []
+    if not path.exists():
+        print(f"[Omis] Fichier introuvable : {path}")
+        return out
+
+    print(f"Lecture XTB : {path}")
+    try:
+        closed_sheet = xtb.find_sheet_by_prefix(path, "CLOSED POSITION")
+        tx_closed = xtb.parse_closed_positions(path, closed_sheet)
+        out += [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
+    except ValueError as e:
+        print(f"  [Erreur XTB Closed] {e}")
+
+    try:
+        open_sheet = xtb.find_sheet_by_prefix(path, "OPEN POSITION")
+        tx_open = xtb.parse_open_positions(path, open_sheet)
+        out += [pos.to_transaction(registry) for pos in tx_open]
+    except ValueError as e:
+        print(f"  [Erreur XTB Open] {e}")
+
+    return out
+
 
 def main():
-    print("=== DÉMARRAGE DU TEST DES PARSERS ===")
-    
-    # 1. Chemins vers tes vrais fichiers
-    binance_trades = Path(DATA_DIR, "trades.csv")
-    binance_converts = Path(DATA_DIR, "convert.csv")
-    xtb_file = Path(DATA_DIR, "account.xlsx")
-    xtb_pea_file = Path(DATA_DIR, "account_pea.xlsx")
-    
-    # 2. Initialiser le registre
-    registry = AssetRegistry()
-    
-    # 3. Tester Binance (on vérifie si les fichiers existent avant de lancer)
-    if binance_trades.exists():
-        print("\nLecture des Trades Binance...")
-        tx_trades = binance.parse_trades(binance_trades, registry)
-        print_transactions("BINANCE - TRADES", tx_trades)
-    else:
-        print(f"\n[Omis] Fichier introuvable : {binance_trades}")
-        
-    if binance_converts.exists():
-        print("\nLecture des Converts Binance...")
-        tx_converts = binance.parse_converts(binance_converts, registry)
-        print_transactions("BINANCE - CONVERTS", tx_converts)
-    else:
-        print(f"\n[Omis] Fichier introuvable : {binance_converts}")
-    
-    # 4. Tester XTB
-    if xtb_file.exists():
-        print("\nLecture des positions XTB...")
-        try:
-            closed_sheet = xtb.find_sheet_by_prefix(xtb_file, "CLOSED POSITION HISTORY")
-            tx_closed = xtb.parse_closed_positions(xtb_file, closed_sheet)
-            tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
-            print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
-        except ValueError as e:
-            print(f"  [Erreur XTB Closed] {e}")
+    print("=== CONSTRUCTION DU WALLET ===")
 
-        try:
-            open_sheet = xtb.find_sheet_by_prefix(xtb_file, "OPEN POSITION 29072026")
-            tx_open = xtb.parse_open_positions(xtb_file, open_sheet)
-            tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
-            print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
-        except ValueError as e:
-            print(f"  [Erreur XTB Open] {e}")
-    else:
-        print(f"\n[Omis] Fichier introuvable : {xtb_file}")
-    # 4. Tester XTB
-    if xtb_pea_file.exists():
-        print("\nLecture des positions XTB...")
-        try:
-            closed_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "CLOSED POSITION HISTORY")
-            tx_closed = xtb.parse_closed_positions(xtb_pea_file, closed_sheet)
-            tx_closed_flat = [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
-            print_transactions("XTB - CLOSED POSITIONS", tx_closed_flat)
-        except ValueError as e:
-            print(f"  [Erreur XTB Closed] {e}")
+    # Wallet existant (fusion incrémentale) plutôt que repartir de zéro à
+    # chaque run -- important dès que l'API de prix historiques a un coût
+    # en temps (rate limit, latence réseau).
+    wallet = load_wallet(TX_STORE_PATH)
+    print(f"Wallet chargé : {len(wallet.transactions)} transaction(s) existante(s)")
 
-        try:
-            open_sheet = xtb.find_sheet_by_prefix(xtb_pea_file, "OPEN POSITION 29072026")
-            tx_open = xtb.parse_open_positions(xtb_pea_file, open_sheet)
-            tx_open_flat = [pos.to_transaction(registry) for pos in tx_open]
-            print_transactions("XTB - OPEN POSITIONS", tx_open_flat)
-        except ValueError as e:
-            print(f"  [Erreur XTB Open] {e}")
-    else:
-        print(f"\n[Omis] Fichier introuvable : {xtb_pea_file}")
-    
-    # 5. Afficher le registre final
-    print(f"\n{'='*60}")
-    print(f" REGISTRE D'ACTIFS CRÉÉ ")
-    print(f"{'='*60}")
-    for asset in registry.get_all_assets():
-        print(f"  ID: {asset.id:<2} | Symbole: {asset.symbol:<10} | Type: {asset.kind.value}")
-    
-    print("\nTest terminé !")
+    # Registre local pour cette passe de parsing -- ses ids ne servent
+    # qu'à relier les transactions entre elles pendant le run ; ils sont
+    # retraduits en symboles au moment de wallet.add_transactions().
+    source_registry = AssetRegistry()
+
+    new_transactions = []
+    new_transactions += _parse_binance(source_registry)
+    new_transactions += _parse_xtb_file(Path(DATA_DIR, "account.xlsx"), source_registry)
+    new_transactions += _parse_xtb_file(Path(DATA_DIR, "account_pea.xlsx"), source_registry)
+
+    added = wallet.add_transactions(new_transactions, source_registry)
+    print(f"{added} nouvelle(s) transaction(s) ajoutée(s) (sur {len(new_transactions)} parsée(s), doublons ignorés)")
+
+    save_wallet(wallet, TX_STORE_PATH)
+    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(wallet.transactions)} transaction(s) au total)")
+
 
 if __name__ == "__main__":
     main()
+
+################################################################################
+# Dossier : src\ledger
+# Fichier : __init__.py
+# Chemin relatif : ledger\__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src\ledger
+# Fichier : cost_basis.py
+# Chemin relatif : ledger\cost_basis.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src\ledger
+# Fichier : positions.py
+# Chemin relatif : ledger\positions.py
+################################################################################
+
+"""
+Reconstruction des positions (quantités détenues) à partir du log de
+transactions du wallet -- pattern event-sourcing : le wallet.json ne
+stocke jamais de solde calculé, seulement les transactions brutes.
+`holdings_at` est la seule source de vérité pour "combien j'ai de X à
+telle date".
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Dict, Optional
+
+from ..schema import TransactionKind
+from ..store.serialize import Wallet
+
+# Sens du mouvement de quantité pour l'actif principal de la transaction,
+# selon son kind. BUY/DEPOSIT augmentent la position, SELL/WITHDRAW/FEE
+# la diminuent.
+_SIGN: Dict[TransactionKind, int] = {
+    TransactionKind.BUY: +1,
+    TransactionKind.DEPOSITE: +1,
+    TransactionKind.SELL: -1,
+    TransactionKind.WITHDRAW: -1,
+    TransactionKind.FEE: -1,
+}
+
+
+def holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, float]:
+    """Quantité détenue par symbole à la date `at` (incluse).
+
+    `at=None` signifie "maintenant" au sens de "toutes les transactions
+    connues" -- pratique pour un snapshot de l'état courant.
+
+    Les quantités quasi nulles issues d'arrondis flottants (< 1e-12) sont
+    ramenées à zéro pour éviter les faux positifs de type "je détiens
+    encore 0.0000000000003 BTC".
+    """
+    holdings: Dict[str, float] = {}
+
+    for tx in sorted(wallet.transactions, key=lambda t: t.time):
+        if at is not None and tx.time > at:
+            break
+
+        symbol = wallet.registry.get_asset(tx.asset_id).symbol
+        sign = _SIGN.get(tx.kind)
+        if sign is None:
+            raise ValueError(f"TransactionKind non géré dans holdings_at: {tx.kind}")
+
+        holdings[symbol] = holdings.get(symbol, 0.0) + sign * tx.quantity
+
+    for symbol, qty in list(holdings.items()):
+        if abs(qty) < 1e-12:
+            holdings[symbol] = 0.0
+
+    return holdings
+
+
+def non_zero_holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, float]:
+    """Comme `holdings_at`, mais filtre les actifs à quantité nulle --
+    pratique pour n'afficher que ce qui est réellement détenu."""
+    return {symbol: qty for symbol, qty in holdings_at(wallet, at).items() if qty != 0.0}
 
 ################################################################################
 # Dossier : src\parse
@@ -723,6 +801,19 @@ class AssetRegistry:
     def get_all_assets(self):
         return list(self._assets.values())
 
+    def get_asset(self, asset_id: int) -> Asset:
+        """Lookup par id -- nécessaire pour retrouver le symbole stable
+        d'une Transaction lors de la sérialisation vers wallet.json."""
+        return self._assets[asset_id]
+
+################################################################################
+# Dossier : src\report
+# Fichier : __init__.py
+# Chemin relatif : report\__init__.py
+################################################################################
+
+
+
 ################################################################################
 # Dossier : src
 # Fichier : schema.py
@@ -766,9 +857,7 @@ class AssetKind(str, Enum):
 
 @dataclass
 class AssetIdentifiers:
-    """Identifiants externes optionnels d'un actif (ISIN, ticker...).
-    `AssetIdentifiers::default()` en Rust ne montre pas les champs réels --
-    complète cette classe si ta version en a d'autres (ISIN, CUSIP, etc.)."""
+    """Identifiants externes optionnels d'un actif (ISIN, ticker...)."""
 
     isin: Optional[str] = None
     ticker: Optional[str] = None
@@ -799,3 +888,215 @@ class Transaction:
     external_id: Optional[str]
     remark: Optional[str]
     source_file: str
+
+################################################################################
+# Dossier : src\store
+# Fichier : __init__.py
+# Chemin relatif : store\__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src\store
+# Fichier : serialize.py
+# Chemin relatif : store\serialize.py
+################################################################################
+
+"""
+Persistance du wallet.json : chargement, sauvegarde et fusion des
+transactions extraites par les parsers (binance.py, xtb.py) dans un état
+durable.
+
+Point clé : wallet.json identifie les actifs par leur SYMBOLE (str), jamais
+par le asset_id (int) généré en mémoire par AssetRegistry. Ces ids ne sont
+stables que pendant un run -- l'ordre de découverte des actifs peut changer
+d'une exécution à l'autre. Le mapping symbol -> asset_id est reconstruit à
+chaque chargement via un AssetRegistry propre au Wallet.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Set
+
+from ..registry import AssetRegistry
+from ..schema import (
+    AssetIdentifiers,
+    AssetKind,
+    Platform,
+    Transaction,
+    TransactionKind,
+)
+
+TX_STORE_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Sérialisation Transaction <-> dict (par symbole)
+# ---------------------------------------------------------------------------
+
+def _transaction_to_dict(tx: Transaction, registry: AssetRegistry) -> dict:
+    asset = registry.get_asset(tx.asset_id)
+    return {
+        "platform": tx.platform.value,
+        "account_label": tx.account_label,
+        "kind": tx.kind.value,
+        "asset": asset.symbol,
+        "quantity": tx.quantity,
+        "price": tx.price,
+        "value_eur": tx.value_eur,
+        "amount": tx.amount,
+        "quote_currency": tx.quote_currency,
+        "time": tx.time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "external_id": tx.external_id,
+        "remark": tx.remark,
+        "source_file": tx.source_file,
+    }
+
+
+def _transaction_from_dict(data: dict, registry: AssetRegistry, assets_meta: Dict[str, dict]) -> Transaction:
+    symbol = data["asset"]
+    meta = assets_meta[symbol]
+    asset_id = registry.find_or_create(
+        symbol,
+        meta["name"],
+        AssetKind(meta["kind"]),
+        meta["ref_currency"],
+        AssetIdentifiers(**meta["identifiers"]),
+    )
+    return Transaction(
+        platform=Platform(data["platform"]),
+        account_label=data["account_label"],
+        kind=TransactionKind(data["kind"]),
+        asset_id=asset_id,
+        quantity=data["quantity"],
+        price=data["price"],
+        value_eur=data["value_eur"],
+        amount=data["amount"],
+        quote_currency=data["quote_currency"],
+        time=datetime.fromisoformat(data["time"].replace("Z", "+00:00")),
+        external_id=data["external_id"],
+        remark=data["remark"],
+        source_file=data["source_file"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wallet : conteneur en mémoire
+# ---------------------------------------------------------------------------
+
+class TxStore:
+    """État persistant du portefeuille : registre d'actifs (keyed par
+    symbole en interne) + log de transactions, source de vérité unique.
+
+    Ne jamais stocker de positions/soldes calculés ici -- ils se
+    reconstruisent à partir du log de transactions (voir portfolio/).
+    """
+
+    def __init__(self) -> None:
+        self.registry = AssetRegistry()
+        self.transactions: List[Transaction] = []
+        self._known_external_ids: Set[str] = set()
+
+    def add_transactions(self, new_transactions: List[Transaction], source_registry: AssetRegistry) -> int:
+        """Fusionne des transactions fraîchement parsées dans le wallet.
+
+        `source_registry` est l'AssetRegistry utilisé par les parsers pour
+        produire `new_transactions` -- ses asset_id sont locaux à ce run et
+        ne correspondent pas forcément à ceux du wallet. On les retraduit
+        via le symbole.
+
+        Les doublons (même external_id déjà connu) sont silencieusement
+        ignorés. Retourne le nombre de transactions effectivement ajoutées.
+        """
+        added = 0
+        for tx in new_transactions:
+            if tx.external_id is not None and tx.external_id in self._known_external_ids:
+                continue
+
+            source_asset = source_registry.get_asset(tx.asset_id)
+            local_asset_id = self.registry.find_or_create(
+                source_asset.symbol,
+                source_asset.name,
+                source_asset.kind,
+                source_asset.ref_currency,
+                source_asset.identifiers,
+            )
+
+            self.transactions.append(Transaction(
+                platform=tx.platform,
+                account_label=tx.account_label,
+                kind=tx.kind,
+                asset_id=local_asset_id,
+                quantity=tx.quantity,
+                price=tx.price,
+                value_eur=tx.value_eur,
+                amount=tx.amount,
+                quote_currency=tx.quote_currency,
+                time=tx.time,
+                external_id=tx.external_id,
+                remark=tx.remark,
+                source_file=tx.source_file,
+            ))
+            if tx.external_id is not None:
+                self._known_external_ids.add(tx.external_id)
+            added += 1
+
+        return added
+
+
+# ---------------------------------------------------------------------------
+# Chargement / sauvegarde JSON
+# ---------------------------------------------------------------------------
+
+def load_tx_store(path: Path) -> TxStore:
+    """Charge un wallet.json existant. Retourne un Wallet vide si le fichier
+    n'existe pas encore (premier import)."""
+    wallet = TxStore()
+
+    if not path.exists():
+        return wallet
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assets_meta = data.get("assets", {})
+
+    for tx_data in data.get("transactions", []):
+        tx = _transaction_from_dict(tx_data, wallet.registry, assets_meta)
+        wallet.transactions.append(tx)
+        if tx.external_id is not None:
+            wallet._known_external_ids.add(tx.external_id)
+
+    return wallet
+
+
+def save_wallet(tx_store: TxStore, path: Path) -> None:
+    """Réécrit le wallet.json en entier (pas d'append) -- garantit un
+    fichier toujours cohérent avec l'état en mémoire."""
+    assets_out = {
+        asset.symbol: {
+            "name": asset.name,
+            "kind": asset.kind.value,
+            "ref_currency": asset.ref_currency,
+            "identifiers": asdict(asset.identifiers),
+        }
+        for asset in tx_store.registry.get_all_assets()
+    }
+
+    transactions_out = [
+        _transaction_to_dict(tx, tx_store.registry) for tx in tx_store.transactions
+    ]
+    transactions_out.sort(key=lambda d: d["time"])  # ordre chronologique stable -> diffs git lisibles
+
+    payload = {
+        "version": TX_STORE_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "assets": assets_out,
+        "transactions": transactions_out,
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
