@@ -17,6 +17,7 @@ from .parse import xtb
 from .parse import binance
 from .registry import AssetRegistry
 from .store.serialize import TxStore, load_wallet, save_wallet
+from .ledger.positions import holdings_at
 
 DATA_DIR = "./data/raw"
 TX_STORE_PATH = Path("./data/tx_store.json")
@@ -50,18 +51,24 @@ def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
 
     print(f"Lecture XTB : {path}")
     try:
-        closed_sheet = xtb.find_sheet_by_prefix(path, "CLOSED POSITION")
+        closed_sheet = xtb.find_sheet_by_prefix(path, "Closed Position")
         tx_closed = xtb.parse_closed_positions(path, closed_sheet)
         out += [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
     except ValueError as e:
         print(f"  [Erreur XTB Closed] {e}")
 
     try:
-        open_sheet = xtb.find_sheet_by_prefix(path, "OPEN POSITION")
+        open_sheet = xtb.find_sheet_by_prefix(path, "Open Position")
         tx_open = xtb.parse_open_positions(path, open_sheet)
         out += [pos.to_transaction(registry) for pos in tx_open]
     except ValueError as e:
         print(f"  [Erreur XTB Open] {e}")
+    try:
+            open_sheet = xtb.find_sheet_by_prefix(path, "Cash")
+            tx_open = xtb.parse_open_positions(path, open_sheet)
+            out += [pos.to_transaction(registry) for pos in tx_open]
+    except ValueError as e:
+            print(f"  [Erreur XTB Open] {e}")
 
     return out
 
@@ -72,8 +79,8 @@ def main():
     # Wallet existant (fusion incrémentale) plutôt que repartir de zéro à
     # chaque run -- important dès que l'API de prix historiques a un coût
     # en temps (rate limit, latence réseau).
-    wallet = load_wallet(TX_STORE_PATH)
-    print(f"Wallet chargé : {len(wallet.transactions)} transaction(s) existante(s)")
+    tx_store = load_wallet(TX_STORE_PATH)
+    print(f"Wallet chargé : {len(tx_store.transactions)} transaction(s) existante(s)")
 
     # Registre local pour cette passe de parsing -- ses ids ne servent
     # qu'à relier les transactions entre elles pendant le run ; ils sont
@@ -85,12 +92,13 @@ def main():
     new_transactions += _parse_xtb_file(Path(DATA_DIR, "account.xlsx"), source_registry)
     new_transactions += _parse_xtb_file(Path(DATA_DIR, "account_pea.xlsx"), source_registry)
 
-    added = wallet.add_transactions(new_transactions, source_registry)
+    added = tx_store.add_transactions(new_transactions, source_registry)
     print(f"{added} nouvelle(s) transaction(s) ajoutée(s) (sur {len(new_transactions)} parsée(s), doublons ignorés)")
 
-    save_wallet(wallet, TX_STORE_PATH)
-    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(wallet.transactions)} transaction(s) au total)")
-
+    save_wallet(tx_store, TX_STORE_PATH)
+    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(tx_store.transactions)} transaction(s) au total)")
+    holdings = holdings_at(tx_store=tx_store)
+    print(holdings)
 
 if __name__ == "__main__":
     main()

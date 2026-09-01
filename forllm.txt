@@ -1,6 +1,14 @@
 
 ################################################################################
 # Dossier : src
+# Fichier : __init__.py
+# Chemin relatif : __init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src
 # Fichier : cli.py
 # Chemin relatif : cli.py
 ################################################################################
@@ -20,9 +28,11 @@ de doublons.
 import os
 from pathlib import Path
 
-from .parse import binance, xtb
+from .parse import xtb
+from .parse import binance
 from .registry import AssetRegistry
-from .store.serialize import Wallet, load_wallet, save_wallet
+from .store.serialize import TxStore, load_wallet, save_wallet
+from .ledger.positions import holdings_at
 
 DATA_DIR = "./data/raw"
 TX_STORE_PATH = Path("./data/tx_store.json")
@@ -56,18 +66,24 @@ def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
 
     print(f"Lecture XTB : {path}")
     try:
-        closed_sheet = xtb.find_sheet_by_prefix(path, "CLOSED POSITION")
+        closed_sheet = xtb.find_sheet_by_prefix(path, "Closed Position")
         tx_closed = xtb.parse_closed_positions(path, closed_sheet)
         out += [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
     except ValueError as e:
         print(f"  [Erreur XTB Closed] {e}")
 
     try:
-        open_sheet = xtb.find_sheet_by_prefix(path, "OPEN POSITION")
+        open_sheet = xtb.find_sheet_by_prefix(path, "Open Position")
         tx_open = xtb.parse_open_positions(path, open_sheet)
         out += [pos.to_transaction(registry) for pos in tx_open]
     except ValueError as e:
         print(f"  [Erreur XTB Open] {e}")
+    try:
+            open_sheet = xtb.find_sheet_by_prefix(path, "Cash")
+            tx_open = xtb.parse_open_positions(path, open_sheet)
+            out += [pos.to_transaction(registry) for pos in tx_open]
+    except ValueError as e:
+            print(f"  [Erreur XTB Open] {e}")
 
     return out
 
@@ -78,8 +94,8 @@ def main():
     # Wallet existant (fusion incrémentale) plutôt que repartir de zéro à
     # chaque run -- important dès que l'API de prix historiques a un coût
     # en temps (rate limit, latence réseau).
-    wallet = load_wallet(TX_STORE_PATH)
-    print(f"Wallet chargé : {len(wallet.transactions)} transaction(s) existante(s)")
+    tx_store = load_wallet(TX_STORE_PATH)
+    print(f"Wallet chargé : {len(tx_store.transactions)} transaction(s) existante(s)")
 
     # Registre local pour cette passe de parsing -- ses ids ne servent
     # qu'à relier les transactions entre elles pendant le run ; ils sont
@@ -91,15 +107,17 @@ def main():
     new_transactions += _parse_xtb_file(Path(DATA_DIR, "account.xlsx"), source_registry)
     new_transactions += _parse_xtb_file(Path(DATA_DIR, "account_pea.xlsx"), source_registry)
 
-    added = wallet.add_transactions(new_transactions, source_registry)
+    added = tx_store.add_transactions(new_transactions, source_registry)
     print(f"{added} nouvelle(s) transaction(s) ajoutée(s) (sur {len(new_transactions)} parsée(s), doublons ignorés)")
 
-    save_wallet(wallet, TX_STORE_PATH)
-    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(wallet.transactions)} transaction(s) au total)")
-
+    save_wallet(tx_store, TX_STORE_PATH)
+    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(tx_store.transactions)} transaction(s) au total)")
+    holdings = holdings_at(tx_store=tx_store)
+    print(holdings)
 
 if __name__ == "__main__":
     main()
+
 
 ################################################################################
 # Dossier : src/ledger
@@ -115,8 +133,7 @@ if __name__ == "__main__":
 # Chemin relatif : ledger/cost_basis.py
 ################################################################################
 
-"""
-Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
+"""Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
 à la vente -- construit sur la même passe unique triée par temps que
 `positions.py`.
 
@@ -305,8 +322,7 @@ def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResu
 # Chemin relatif : ledger/positions.py
 ################################################################################
 
-"""
-Reconstruction des positions (quantités détenues) à partir du log de
+"""Reconstruction des positions (quantités détenues) à partir du log de
 transactions du wallet -- pattern event-sourcing : le wallet.json ne
 stocke jamais de solde calculé, seulement les transactions brutes.
 `holdings_at` est la seule source de vérité pour "combien j'ai de X à
@@ -319,7 +335,7 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from ..schema import TransactionKind
-from ..store.serialize import Wallet
+from ..store.serialize import TxStore
 
 # Sens du mouvement de quantité pour l'actif principal de la transaction,
 # selon son kind. BUY/DEPOSIT augmentent la position, SELL/WITHDRAW/FEE
@@ -333,7 +349,7 @@ _SIGN: Dict[TransactionKind, int] = {
 }
 
 
-def holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, float]:
+def holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Dict[str, float]:
     """Quantité détenue par symbole à la date `at` (incluse).
 
     `at=None` signifie "maintenant" au sens de "toutes les transactions
@@ -345,11 +361,11 @@ def holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, floa
     """
     holdings: Dict[str, float] = {}
 
-    for tx in sorted(wallet.transactions, key=lambda t: t.time):
+    for tx in sorted(tx_store.transactions, key=lambda t: t.time):
         if at is not None and tx.time > at:
             break
 
-        symbol = wallet.registry.get_asset(tx.asset_id).symbol
+        symbol = tx_store.registry.get_asset(tx.asset_id).symbol
         sign = _SIGN.get(tx.kind)
         if sign is None:
             raise ValueError(f"TransactionKind non géré dans holdings_at: {tx.kind}")
@@ -363,10 +379,11 @@ def holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, floa
     return holdings
 
 
-def non_zero_holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[str, float]:
+def non_zero_holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Dict[str, float]:
     """Comme `holdings_at`, mais filtre les actifs à quantité nulle --
     pratique pour n'afficher que ce qui est réellement détenu."""
-    return {symbol: qty for symbol, qty in holdings_at(wallet, at).items() if qty != 0.0}
+    return {symbol: qty for symbol, qty in holdings_at(tx_store, at).items() if qty != 0.0}
+
 
 ################################################################################
 # Dossier : src/parse
@@ -408,7 +425,7 @@ def _synthetic_id(prefix: str, *parts: str) -> str:
     """
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}-{digest}"
- 
+
 
 def _split_amount(raw: str) -> tuple[float, str]:
     """Sépare une cellule collée '<nombre><symbole>' (format Trade History)."""
@@ -505,7 +522,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
             fee_price_eur = historical_price_eur(fee_symbol, time)
             fee_value_eur = fee_amount * fee_price_eur
-            
+
             out.append(Transaction(
                 platform=Platform.BINANCE,
                 account_label="Spot",
@@ -593,6 +610,7 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
         ))
 
     return out
+
 
 ################################################################################
 # Dossier : src/parse
@@ -842,6 +860,7 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
     finally:
         wb.close()
 
+
 ################################################################################
 # Dossier : src
 # Fichier : prices.py
@@ -849,7 +868,7 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
 ################################################################################
 
 """Équivalent Python de pf_price::historical_price_eur.
-Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide, 
+Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide,
 aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
 """
 
@@ -876,10 +895,10 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
     # On convertit la date en timestamp millisecondes (début de journée UTC)
     dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start_ms = int(dt.timestamp() * 1000)
-    
+
     # On introduit un tout petit délai (0.1s) pour être poli avec l'API
     time.sleep(0.1)
-    
+
     resp = requests.get(
         _BINANCE_API,
         params={
@@ -895,10 +914,10 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
 
 
 def _get_price_from_binance(symbol: str, time: datetime) -> float:
-    """Tente de récupérer le prix via Binance. 
+    """Tente de récupérer le prix via Binance.
     Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
     day_str = time.strftime("%Y-%m-%d")
-    
+
     # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
     try:
         data = _binance_klines(f"{symbol}EUR", day_str)
@@ -915,7 +934,7 @@ def _get_price_from_binance(symbol: str, time: datetime) -> float:
     try:
         usdt_data = _binance_klines(f"{symbol}USDT", day_str)
         eurusdt_data = _binance_klines("EURUSDT", day_str)
-        
+
         if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
             price_usdt = float(usdt_data[0][4])
             eurusdt_rate = float(eurusdt_data[0][4])
@@ -951,6 +970,7 @@ def historical_price_eur(symbol: str, time: datetime) -> float:
         day_str = time.strftime("%Y-%m-%d")
         print(f"  [WARN] Prix indisponible pour {symbol} au {day_str}. Prix mis à 0.")
         return 0.0
+
 
 ################################################################################
 # Dossier : src
@@ -1039,6 +1059,7 @@ Rust de `AssetIdentifiers` ou `Transaction` a d'autres champs, ajuste ici.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -1090,7 +1111,7 @@ class Transaction:
     asset_id: int
     quantity: float
     price: Optional[float]
-    value_eur: float # immutable 
+    value_eur: float  # immutable
     amount: Optional[float]
     quote_currency: Optional[str]
     time: datetime
@@ -1105,6 +1126,7 @@ def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
     digest = hashlib.sha256(f"{kind.value}|{ref_currency}|{symbol}".encode()).hexdigest()
     return int(digest[:15], 16)  # tient dans un int 64 bits signé
 
+
 ################################################################################
 # Dossier : src/store
 # Fichier : __init__.py
@@ -1118,7 +1140,6 @@ def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
 # Fichier : serialize.py
 # Chemin relatif : store/serialize.py
 ################################################################################
-
 
 from __future__ import annotations
 
@@ -1305,3 +1326,17 @@ def save_wallet(tx_store: TxStore, path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Alias de compatibilité
+# ---------------------------------------------------------------------------
+# cli.py, ledger/positions.py et ledger/cost_basis.py importent `Wallet` et
+# `load_wallet` (nommage pré-renommage), alors que ce module définit `TxStore`
+# et `load_tx_store` (nommage post-renommage vers serialized_tx.json). Sans
+# ces alias, TOUT le package échoue à l'import (ImportError). Cf. le message
+# ci-dessous pour le détail -- à corriger dans le vrai code plutôt que de
+# garder cet alias indéfiniment.
+Wallet = TxStore
+load_wallet = load_tx_store
+
