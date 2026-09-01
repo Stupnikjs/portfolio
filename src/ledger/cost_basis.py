@@ -1,5 +1,4 @@
-"""
-Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
+"""Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
 à la vente -- construit sur la même passe unique triée par temps que
 `positions.py`.
 

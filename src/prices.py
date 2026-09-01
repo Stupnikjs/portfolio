@@ -1,5 +1,5 @@
 """Équivalent Python de pf_price::historical_price_eur.
-Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide, 
+Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide,
 aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
 """
 
@@ -26,10 +26,10 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
     # On convertit la date en timestamp millisecondes (début de journée UTC)
     dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start_ms = int(dt.timestamp() * 1000)
-    
+
     # On introduit un tout petit délai (0.1s) pour être poli avec l'API
     time.sleep(0.1)
-    
+
     resp = requests.get(
         _BINANCE_API,
         params={
@@ -45,10 +45,10 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
 
 
 def _get_price_from_binance(symbol: str, time: datetime) -> float:
-    """Tente de récupérer le prix via Binance. 
+    """Tente de récupérer le prix via Binance.
     Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
     day_str = time.strftime("%Y-%m-%d")
-    
+
     # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
     try:
         data = _binance_klines(f"{symbol}EUR", day_str)
@@ -65,7 +65,7 @@ def _get_price_from_binance(symbol: str, time: datetime) -> float:
     try:
         usdt_data = _binance_klines(f"{symbol}USDT", day_str)
         eurusdt_data = _binance_klines("EURUSDT", day_str)
-        
+
         if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
             price_usdt = float(usdt_data[0][4])
             eurusdt_rate = float(eurusdt_data[0][4])

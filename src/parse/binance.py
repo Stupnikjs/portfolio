@@ -24,7 +24,7 @@ def _synthetic_id(prefix: str, *parts: str) -> str:
     """
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}-{digest}"
- 
+
 
 def _split_amount(raw: str) -> tuple[float, str]:
     """Sépare une cellule collée '<nombre><symbole>' (format Trade History)."""
@@ -121,7 +121,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
             fee_price_eur = historical_price_eur(fee_symbol, time)
             fee_value_eur = fee_amount * fee_price_eur
-            
+
             out.append(Transaction(
                 platform=Platform.BINANCE,
                 account_label="Spot",

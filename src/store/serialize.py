@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -184,3 +183,16 @@ def save_wallet(tx_store: TxStore, path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Alias de compatibilité
+# ---------------------------------------------------------------------------
+# cli.py, ledger/positions.py et ledger/cost_basis.py importent `Wallet` et
+# `load_wallet` (nommage pré-renommage), alors que ce module définit `TxStore`
+# et `load_tx_store` (nommage post-renommage vers serialized_tx.json). Sans
+# ces alias, TOUT le package échoue à l'import (ImportError). Cf. le message
+# ci-dessous pour le détail -- à corriger dans le vrai code plutôt que de
+# garder cet alias indéfiniment.
+Wallet = TxStore
+load_wallet = load_tx_store

@@ -8,6 +8,7 @@ Rust de `AssetIdentifiers` ou `Transaction` a d'autres champs, ajuste ici.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -59,7 +60,7 @@ class Transaction:
     asset_id: int
     quantity: float
     price: Optional[float]
-    value_eur: float # immutable 
+    value_eur: float  # immutable
     amount: Optional[float]
     quote_currency: Optional[str]
     time: datetime

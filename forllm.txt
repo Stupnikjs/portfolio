@@ -102,25 +102,207 @@ if __name__ == "__main__":
     main()
 
 ################################################################################
-# Dossier : src\ledger
+# Dossier : src/ledger
 # Fichier : __init__.py
-# Chemin relatif : ledger\__init__.py
+# Chemin relatif : ledger/__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src\ledger
+# Dossier : src/ledger
 # Fichier : cost_basis.py
-# Chemin relatif : ledger\cost_basis.py
+# Chemin relatif : ledger/cost_basis.py
 ################################################################################
 
+"""
+Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
+à la vente -- construit sur la même passe unique triée par temps que
+`positions.py`.
+
+FIFO plutôt que coût moyen pondéré : c'est la méthode retenue par défaut
+par l'administration fiscale française pour les cessions de valeurs
+mobilières, donc partir directement sur FIFO évite d'avoir à tout refaire
+au moment d'une déclaration.
+
+Le coût/produit de chaque transaction est dérivé de `value_eur` (marqué
+immutable dans schema.py, donc la valeur EUR faisant autorité) plutôt que
+de `quantity * price` : `price` est optionnel et parfois exprimé dans la
+devise locale de l'actif plutôt qu'en EUR (cas XTB), donc le recalculer
+soi-même serait faux dans ce cas.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Deque, Dict, List, Optional
+
+from ..schema import TransactionKind
+from ..store.serialize import Wallet
+
+
+def _unit_value_eur(quantity: float, value_eur: float) -> float:
+    """Valeur EUR par unité, dérivée de `value_eur` (champ immutable qui
+    fait autorité) plutôt que de `tx.price` (optionnel, parfois en devise
+    locale plutôt qu'en EUR -- voir XtbClosedPosition/XtbOpenPosition)."""
+    if quantity <= 0:
+        raise ValueError(f"quantity doit être positive, reçu {quantity}")
+    return value_eur / quantity
+
+
+@dataclass
+class Lot:
+    """Un lot FIFO : une tranche de quantité acquise à un prix donné."""
+    quantity: float
+    unit_cost_eur: float
+    acquired_at: datetime
+    external_id: Optional[str] = None
+
+
+@dataclass
+class RealizedGain:
+    """Résultat d'une vente rapprochée avec un ou plusieurs lots FIFO."""
+    symbol: str
+    sell_time: datetime
+    quantity: float
+    proceeds_eur: float
+    cost_eur: float
+    pnl_eur: float
+    external_id: Optional[str] = None
+    lots_consumed: List[Lot] = field(default_factory=list)
+    incomplete: bool = False  # True si la vente dépasse les lots connus
+
+
+@dataclass
+class CostBasisResult:
+    """Sortie complète du calcul FIFO pour un wallet."""
+    open_lots: Dict[str, List[Lot]]       # symbol -> lots restants, ordre FIFO
+    realized_gains: List[RealizedGain]    # historique des ventes rapprochées
+    fees_eur_by_symbol: Dict[str, float]  # frais cumulés par actif
+
+    def open_quantity(self, symbol: str) -> float:
+        return sum(lot.quantity for lot in self.open_lots.get(symbol, []))
+
+    def open_cost_basis(self, symbol: str) -> float:
+        """Coût de revient total des lots encore ouverts pour `symbol`."""
+        return sum(lot.quantity * lot.unit_cost_eur for lot in self.open_lots.get(symbol, []))
+
+    def average_cost(self, symbol: str) -> Optional[float]:
+        """Prix de revient moyen par unité sur les lots ouverts (None si rien détenu)."""
+        qty = self.open_quantity(symbol)
+        if qty <= 0:
+            return None
+        return self.open_cost_basis(symbol) / qty
+
+    def total_realized_pnl(self, symbol: Optional[str] = None) -> float:
+        gains = self.realized_gains if symbol is None else [g for g in self.realized_gains if g.symbol == symbol]
+        return sum(g.pnl_eur for g in gains)
+
+    def total_fees(self, symbol: Optional[str] = None) -> float:
+        if symbol is not None:
+            return self.fees_eur_by_symbol.get(symbol, 0.0)
+        return sum(self.fees_eur_by_symbol.values())
+
+
+def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResult:
+    """Rejoue les transactions du wallet dans l'ordre chronologique et
+    applique la méthode FIFO : chaque SELL/WITHDRAW consomme les lots
+    BUY/DEPOSITE les plus anciens en premier.
+
+    `at=None` -- comme pour `holdings_at` -- rejoue toutes les transactions
+    connues. Passer une date permet un calcul "à l'époque" (utile pour une
+    déclaration fiscale sur une année passée, par exemple).
+
+    Les FEE ne sont pas rattachés à un lot précis : le schéma actuel ne
+    permet pas de distinguer de façon fiable si un frais porte sur l'achat
+    ou sur la vente. Ils sont donc accumulés séparément par actif
+    (`fees_eur_by_symbol`) -- à soustraire toi-même du P&L si tu veux un
+    résultat net de frais.
+
+    Si une vente dépasse la quantité connue en lots ouverts (transfert
+    entrant non tracé, données historiques incomplètes...), le reliquat
+    est valorisé à un coût de 0 et le `RealizedGain` correspondant est
+    marqué `incomplete=True` -- son `pnl_eur` est donc surestimé d'autant.
+    """
+    lots: Dict[str, Deque[Lot]] = {}
+    realized: List[RealizedGain] = []
+    fees: Dict[str, float] = {}
+
+    transactions = sorted(wallet.transactions, key=lambda t: t.time)
+
+    for tx in transactions:
+        if at is not None and tx.time > at:
+            break
+
+        symbol = wallet.registry.get_asset(tx.asset_id).symbol
+
+        if tx.kind in (TransactionKind.BUY, TransactionKind.DEPOSITE):
+            queue = lots.setdefault(symbol, deque())
+            queue.append(Lot(
+                quantity=tx.quantity,
+                unit_cost_eur=_unit_value_eur(tx.quantity, tx.value_eur),
+                acquired_at=tx.time,
+                external_id=tx.external_id,
+            ))
+
+        elif tx.kind in (TransactionKind.SELL, TransactionKind.WITHDRAW):
+            queue = lots.setdefault(symbol, deque())
+            remaining = tx.quantity
+            consumed: List[Lot] = []
+            cost_eur = 0.0
+            incomplete = False
+
+            while remaining > 1e-12 and queue:
+                lot = queue[0]
+                take = min(lot.quantity, remaining)
+
+                cost_eur += take * lot.unit_cost_eur
+                consumed.append(Lot(
+                    quantity=take, unit_cost_eur=lot.unit_cost_eur,
+                    acquired_at=lot.acquired_at, external_id=lot.external_id,
+                ))
+
+                lot.quantity -= take
+                remaining -= take
+                if lot.quantity <= 1e-12:
+                    queue.popleft()
+
+            if remaining > 1e-12:
+                # Pas de lot connu pour couvrir le reliquat : coût inconnu,
+                # traité comme 0 -- signalé via `incomplete` plutôt que
+                # silencieusement absorbé dans le P&L.
+                consumed.append(Lot(quantity=remaining, unit_cost_eur=0.0, acquired_at=tx.time))
+                incomplete = True
+
+            proceeds_eur = tx.value_eur
+            realized.append(RealizedGain(
+                symbol=symbol,
+                sell_time=tx.time,
+                quantity=tx.quantity,
+                proceeds_eur=proceeds_eur,
+                cost_eur=cost_eur,
+                pnl_eur=proceeds_eur - cost_eur,
+                external_id=tx.external_id,
+                lots_consumed=consumed,
+                incomplete=incomplete,
+            ))
+
+        elif tx.kind == TransactionKind.FEE:
+            fees[symbol] = fees.get(symbol, 0.0) + (tx.value_eur or 0.0)
+
+        else:
+            raise ValueError(f"TransactionKind non géré dans compute_fifo: {tx.kind}")
+
+    open_lots = {symbol: list(queue) for symbol, queue in lots.items() if queue}
+    return CostBasisResult(open_lots=open_lots, realized_gains=realized, fees_eur_by_symbol=fees)
 
 
 ################################################################################
-# Dossier : src\ledger
+# Dossier : src/ledger
 # Fichier : positions.py
-# Chemin relatif : ledger\positions.py
+# Chemin relatif : ledger/positions.py
 ################################################################################
 
 """
@@ -187,17 +369,17 @@ def non_zero_holdings_at(wallet: Wallet, at: Optional[datetime] = None) -> Dict[
     return {symbol: qty for symbol, qty in holdings_at(wallet, at).items() if qty != 0.0}
 
 ################################################################################
-# Dossier : src\parse
+# Dossier : src/parse
 # Fichier : __init__.py
-# Chemin relatif : parse\__init__.py
+# Chemin relatif : parse/__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src\parse
+# Dossier : src/parse
 # Fichier : binance.py
-# Chemin relatif : parse\binance.py
+# Chemin relatif : parse/binance.py
 ################################################################################
 
 """Équivalent Python de pf_extract::binance (parse_trades, parse_converts)."""
@@ -413,9 +595,9 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
     return out
 
 ################################################################################
-# Dossier : src\parse
+# Dossier : src/parse
 # Fichier : xtb.py
-# Chemin relatif : parse\xtb.py
+# Chemin relatif : parse/xtb.py
 ################################################################################
 
 """Équivalent Python de pf_extract::xtb (positions ouvertes/fermées XTB)."""
@@ -467,14 +649,14 @@ class XtbClosedPosition:
                 asset_id=asset_id, quantity=self.volume, price=self.open_price,
                 amount=self.purchase_value, quote_currency=None, time=self.open_time,
                 value_eur=self.purchase_value,
-                external_id=self.position_id, remark=None, source_file=self.source_file,
+                external_id=f"{self.position_id}-buy", remark=None, source_file=self.source_file,
             ),
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.SELL,
                 asset_id=asset_id, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
-                external_id=self.position_id, remark=None, source_file=self.source_file,
+             external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
             ),
         ]
 
@@ -776,26 +958,52 @@ def historical_price_eur(symbol: str, time: datetime) -> float:
 # Chemin relatif : registry.py
 ################################################################################
 
-from .schema import Asset, AssetIdentifiers, AssetKind
+import hashlib
 from typing import Dict
+
+from .schema import Asset, AssetIdentifiers, AssetKind
+
+
+def _stable_asset_id(symbol: str) -> int:
+    """ID déterministe dérivé du symbole -- le même symbole produit
+    toujours le même id, indépendamment de l'ordre de parsing ou du run.
+
+    Ça élimine le besoin de remapper les asset_id d'un registre local
+    (créé à chaque exécution de cli.py) vers le registre persistant du
+    wallet : `find_or_create()` sur n'importe quel registre -- local à
+    un run, ou celui rechargé depuis wallet.json -- attribue le même id
+    au même symbole, donc `wallet.add_transactions()` peut fusionner
+    directement sans traduction d'ids.
+    """
+    digest = hashlib.sha256(symbol.encode("utf-8")).hexdigest()
+    return int(digest[:15], 16)  # 60 bits -- collision négligeable pour un nombre de symboles réaliste
+
 
 class AssetRegistry:
     def __init__(self):
         self._assets: Dict[int, Asset] = {}
         self._symbol_to_id: Dict[str, int] = {}
-        self._next_id = 1
 
     def find_or_create(self, symbol: str, name: str, kind: AssetKind, ref_currency: str, identifiers: AssetIdentifiers) -> int:
         if symbol in self._symbol_to_id:
             return self._symbol_to_id[symbol]
-        
-        asset_id = self._next_id
+
+        asset_id = _stable_asset_id(symbol)
+        existing = self._assets.get(asset_id)
+        if existing is not None and existing.symbol != symbol:
+            # Collision sha256 tronquée à 60 bits : astronomiquement
+            # improbable pour un nombre de symboles réaliste (~2^60
+            # valeurs possibles), mais on préfère planter bruyamment
+            # plutôt que corrompre silencieusement un actif existant.
+            raise ValueError(
+                f"Collision d'id entre '{symbol}' et '{existing.symbol}' (id={asset_id})"
+            )
+
         self._assets[asset_id] = Asset(
-            id=asset_id, symbol=symbol, name=name, kind=kind, 
+            id=asset_id, symbol=symbol, name=name, kind=kind,
             ref_currency=ref_currency, identifiers=identifiers
         )
         self._symbol_to_id[symbol] = asset_id
-        self._next_id += 1
         return asset_id
 
     def get_all_assets(self):
@@ -806,10 +1014,11 @@ class AssetRegistry:
         d'une Transaction lors de la sérialisation vers wallet.json."""
         return self._assets[asset_id]
 
+
 ################################################################################
-# Dossier : src\report
+# Dossier : src/report
 # Fichier : __init__.py
-# Chemin relatif : report\__init__.py
+# Chemin relatif : report/__init__.py
 ################################################################################
 
 
@@ -889,31 +1098,27 @@ class Transaction:
     remark: Optional[str]
     source_file: str
 
+
+def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
+    """ID stable : le même triplet (symbol, kind, ref_currency) donne
+    toujours le même id, peu importe l'ordre de parsing ou le run."""
+    digest = hashlib.sha256(f"{kind.value}|{ref_currency}|{symbol}".encode()).hexdigest()
+    return int(digest[:15], 16)  # tient dans un int 64 bits signé
+
 ################################################################################
-# Dossier : src\store
+# Dossier : src/store
 # Fichier : __init__.py
-# Chemin relatif : store\__init__.py
+# Chemin relatif : store/__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src\store
+# Dossier : src/store
 # Fichier : serialize.py
-# Chemin relatif : store\serialize.py
+# Chemin relatif : store/serialize.py
 ################################################################################
 
-"""
-Persistance du wallet.json : chargement, sauvegarde et fusion des
-transactions extraites par les parsers (binance.py, xtb.py) dans un état
-durable.
-
-Point clé : wallet.json identifie les actifs par leur SYMBOLE (str), jamais
-par le asset_id (int) généré en mémoire par AssetRegistry. Ces ids ne sont
-stables que pendant un run -- l'ordre de découverte des actifs peut changer
-d'une exécution à l'autre. Le mapping symbol -> asset_id est reconstruit à
-chaque chargement via un AssetRegistry propre au Wallet.
-"""
 
 from __future__ import annotations
 

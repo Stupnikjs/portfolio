@@ -13,9 +13,10 @@ de doublons.
 import os
 from pathlib import Path
 
-from .parse import binance, xtb
+from .parse import xtb
+from .parse import binance
 from .registry import AssetRegistry
-from .store.serialize import Wallet, load_wallet, save_wallet
+from .store.serialize import TxStore, load_wallet, save_wallet
 
 DATA_DIR = "./data/raw"
 TX_STORE_PATH = Path("./data/tx_store.json")
