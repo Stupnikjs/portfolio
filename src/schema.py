@@ -18,6 +18,7 @@ from typing import Optional
 class Platform(str, Enum):
     BINANCE = "Binance"
     XTB = "Xtb"
+    MANUAL  = "Manual"
 
 
 class TransactionKind(str, Enum):

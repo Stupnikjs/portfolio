@@ -13,20 +13,21 @@ de doublons.
 import os
 from pathlib import Path
 
-from .parse import xtb
-from .parse import binance
+from .parse import binance, xtb, manual
 from .registry import AssetRegistry
 from .store.serialize import TxStore, load_wallet, save_wallet
 from .ledger.positions import holdings_at
+from .schema import Platform
 
 DATA_DIR = "./data/raw"
+MANUAL_PATH = Path(DATA_DIR, "manual_tx.json")
 TX_STORE_PATH = Path("./data/tx_store.json")
-
+ACCOUNTS_PATH = Path(DATA_DIR, "accounts")
 
 def _parse_binance(registry: AssetRegistry) -> list:
     out = []
-    trades_path = Path(DATA_DIR, "trades.csv")
-    converts_path = Path(DATA_DIR, "convert.csv")
+    trades_path = Path(ACCOUNTS_PATH, "trades.csv")
+    converts_path = Path(ACCOUNTS_PATH, "convert.csv")
 
     if trades_path.exists():
         print(f"Lecture Binance Trades : {trades_path}")
@@ -63,12 +64,12 @@ def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
         out += [pos.to_transaction(registry) for pos in tx_open]
     except ValueError as e:
         print(f"  [Erreur XTB Open] {e}")
+
     try:
-            open_sheet = xtb.find_sheet_by_prefix(path, "Cash")
-            tx_open = xtb.parse_open_positions(path, open_sheet)
-            out += [pos.to_transaction(registry) for pos in tx_open]
+        cash_sheet = xtb.find_sheet_by_prefix(path, "Cash")
+        out += xtb.parse_cash_operations(path, cash_sheet, registry)
     except ValueError as e:
-            print(f"  [Erreur XTB Open] {e}")
+        print(f"  [Erreur XTB Cash] {e}")
 
     return out
 
@@ -76,27 +77,30 @@ def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
 def main():
     print("=== CONSTRUCTION DU WALLET ===")
 
-    # Wallet existant (fusion incrémentale) plutôt que repartir de zéro à
-    # chaque run -- important dès que l'API de prix historiques a un coût
-    # en temps (rate limit, latence réseau).
     tx_store = load_wallet(TX_STORE_PATH)
     print(f"Wallet chargé : {len(tx_store.transactions)} transaction(s) existante(s)")
 
-    # Registre local pour cette passe de parsing -- ses ids ne servent
-    # qu'à relier les transactions entre elles pendant le run ; ils sont
-    # retraduits en symboles au moment de wallet.add_transactions().
+
     source_registry = AssetRegistry()
 
     new_transactions = []
+    xtb_tx = []
     new_transactions += _parse_binance(source_registry)
-    new_transactions += _parse_xtb_file(Path(DATA_DIR, "account.xlsx"), source_registry)
-    new_transactions += _parse_xtb_file(Path(DATA_DIR, "account_pea.xlsx"), source_registry)
+    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account.xlsx"), source_registry)
+    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account_pea.xlsx"), source_registry)
 
-    added = tx_store.add_transactions(new_transactions, source_registry)
-    print(f"{added} nouvelle(s) transaction(s) ajoutée(s) (sur {len(new_transactions)} parsée(s), doublons ignorés)")
+    
+    _ = tx_store.add_transactions(new_transactions, source_registry)
+    _ = tx_store.add_transactions(xtb_tx, source_registry)
+    replaced = tx_store.replace_platform(Platform.XTB, xtb_tx, source_registry)
+    print(f"XTB : {replaced} transaction(s) (remplacement complet)")
+
+    manual_tx = manual.parse_manual(MANUAL_PATH, source_registry)
+    replaced = tx_store.replace_platform(Platform.MANUAL, manual_tx, source_registry)
 
     save_wallet(tx_store, TX_STORE_PATH)
     print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(tx_store.transactions)} transaction(s) au total)")
+
     holdings = holdings_at(tx_store=tx_store)
     print(holdings)
 

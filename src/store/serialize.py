@@ -130,6 +130,17 @@ class TxStore:
             added += 1
 
         return added
+    def replace_platform(
+    self, platform: Platform, new_transactions: list[Transaction], source_registry: AssetRegistry
+    ) -> int:
+        """Remplace en bloc toutes les transactions d'une plateforme donnée
+        (utilisé pour MANUAL : le fichier source fait autorité, contrairement
+        au reste du pipeline qui est append-only par dédup d'external_id)."""
+        self.transactions = [tx for tx in self.transactions if tx.platform != platform]
+        self._known_external_ids = {
+            tx.external_id for tx in self.transactions if tx.external_id is not None
+        }
+        return self.add_transactions(new_transactions, source_registry)
 
 
 # ---------------------------------------------------------------------------

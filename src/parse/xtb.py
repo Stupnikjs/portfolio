@@ -54,7 +54,7 @@ class XtbClosedPosition:
                 asset_id=asset_id, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
-             external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
+                external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
             ),
         ]
 
@@ -139,8 +139,25 @@ def _cell_datetime(value) -> datetime:
     raise ValueError(f"format de date inattendu: {value!r}")
 
 
+def _find_header_row(rows: list[tuple], required_col: str) -> int:
+    """Trouve l'index de la ligne d'en-tête -- celle qui contient
+    `required_col`. Les exports XTB ont un nombre variable de lignes de
+    titre/résumé de compte au-dessus du vrai tableau, et ce nombre change
+    d'une version d'export à l'autre -- chercher par nom plutôt que
+    supposer une position fixe évite de recasser au prochain changement
+    de format XTB."""
+    for i, row in enumerate(rows):
+        if row and required_col in row:
+            return i
+    raise ValueError(f"en-tête introuvable (colonne '{required_col}' non trouvée)")
+
+
+def _column_map(header_row: tuple) -> dict[str, int]:
+    return {str(name).strip(): i for i, name in enumerate(header_row) if name is not None}
+
+
 def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPosition]:
-    """Parse l'onglet 'Closed Position History' d'un export XTB xlsx.
+    """Parse l'onglet 'Closed Positions' d'un export XTB xlsx.
 
     NB: pas de `read_only=True` ici -- openpyxl s'appuie en mode read_only sur
     la balise `<dimension>` du XML pour savoir quelle plage lire, et les
@@ -152,39 +169,36 @@ def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPositio
     wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
     try:
         sheet = wb[sheet_name]
+        rows = list(sheet.iter_rows(values_only=True))
+        header_idx = _find_header_row(rows, "Position ID")
+        col = _column_map(rows[header_idx])
         out: list[XtbClosedPosition] = []
 
-        # Pas de `next(rows, None)` pour sauter un en-tête fixe : les exports
-        # XTB ont un nombre variable de lignes de titre/résumé de compte
-        # au-dessus du vrai tableau (colonne A vide -> décalage d'index +1
-        # sur toutes les colonnes). On ignore simplement toute ligne dont la
-        # colonne "Position" (row[1]) n'est pas un nombre -- ça élimine à la
-        # fois les lignes de titre, la ligne d'en-tête et la ligne "Total".
-        for row in sheet.iter_rows(values_only=True):
-            position_id = _cell_f64(row[1])
+        for row in rows[header_idx + 1:]:
+            position_id = _cell_f64(row[col["Position ID"]])
             if position_id is None:
-                continue
+                continue  # ligne "Total" ou vide
 
             out.append(XtbClosedPosition(
                 position_id=str(int(position_id)),
-                symbol=_cell_str(row[2]),
-                side=_cell_str(row[3]),
-                volume=_cell_f64(row[4]) or 0.0,
-                open_time=_cell_datetime(row[5]),
-                open_price=_cell_f64(row[6]) or 0.0,
-                close_time=_cell_datetime(row[7]),
-                close_price=_cell_f64(row[8]) or 0.0,
-                open_origin=_cell_str(row[9]),
-                close_origin=_cell_str(row[10]),
-                purchase_value=_cell_f64(row[11]) or 0.0,
-                sale_value=_cell_f64(row[12]) or 0.0,
-                sl=_cell_f64(row[13]),
-                tp=_cell_f64(row[14]),
-                margin=_cell_f64(row[15]),
-                commission=_cell_f64(row[16]) or 0.0,
-                swap=_cell_f64(row[17]) or 0.0,
-                rollover=_cell_f64(row[18]) or 0.0,
-                gross_pl=_cell_f64(row[19]) or 0.0,
+                symbol=_cell_str(row[col["Ticker"]]),
+                side=_cell_str(row[col["Type"]]),
+                volume=_cell_f64(row[col["Volume"]]) or 0.0,
+                open_time=_cell_datetime(row[col["Open Time (UTC)"]]),
+                open_price=_cell_f64(row[col["Open Price"]]) or 0.0,
+                close_time=_cell_datetime(row[col["Close Time (UTC)"]]),
+                close_price=_cell_f64(row[col["Close Price"]]) or 0.0,
+                open_origin=_cell_str(row[col["Open Origin"]]) if "Open Origin" in col else "",
+                close_origin=_cell_str(row[col["Close Origin"]]) if "Close Origin" in col else "",
+                purchase_value=_cell_f64(row[col["Purchase Value"]]) or 0.0,
+                sale_value=_cell_f64(row[col["Sale Value"]]) or 0.0,
+                sl=_cell_f64(row[col["Stop Loss"]]),
+                tp=_cell_f64(row[col["Take Profit"]]),
+                margin=_cell_f64(row[col["Margin"]]),
+                commission=_cell_f64(row[col["Commission"]]) or 0.0,
+                swap=_cell_f64(row[col["Swap"]]) or 0.0,
+                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
+                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
                 source_file=source_file,
             ))
         return out
@@ -193,47 +207,123 @@ def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPositio
 
 
 def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
-    """Parse l'onglet 'OPEN POSITION <date>' d'un export XTB xlsx.
-    Le nom de l'onglet inclut une date qui change à chaque export
-    (ex: 'OPEN POSITION 29072026'), donc `sheet_name` doit être fourni exactement.
+    """Parse l'onglet 'Open Positions' d'un export XTB xlsx.
 
-    Voir la note dans `parse_closed_positions` : pas de `read_only=True`.
+    Le tableau contient deux types de lignes : des lignes "résumé" par
+    instrument (colonne Type vide, Instrument/Position = nom lisible) et des
+    lignes "détail" par position individuelle (Type='BUY', Instrument/Position
+    = l'identifiant numérique de la position). Seules les secondes sont
+    retenues.
     """
     source_file = str(path)
     wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
     try:
         sheet = wb[sheet_name]
-        rows = sheet.iter_rows(values_only=True)
-        next(rows, None)  # en-tête
+        rows = list(sheet.iter_rows(values_only=True))
+        header_idx = _find_header_row(rows, "Instrument/Position")
+        col = _column_map(rows[header_idx])
         out: list[XtbOpenPosition] = []
 
-        for row in rows:
-            position_id = _cell_f64(row[0])
-            if position_id is None:
+        for row in rows[header_idx + 1:]:
+            side = _cell_str(row[col["Type"]])
+            if not side:
                 continue
-            if position_id == 0.0 and row[1] is None:
+            position_id = _cell_str(row[col["Instrument/Position"]])
+            if not position_id:
                 continue
-
-            comment = _cell_str(row[15]) if len(row) > 15 else ""
-            comment = comment or None
 
             out.append(XtbOpenPosition(
-                position_id=str(int(position_id)),
-                symbol=_cell_str(row[1]),
-                side=_cell_str(row[2]),
-                volume=_cell_f64(row[3]) or 0.0,
-                open_time=_cell_datetime(row[4]),
-                open_price=_cell_f64(row[5]) or 0.0,
-                market_price=_cell_f64(row[6]) or 0.0,
-                purchase_value=_cell_f64(row[7]) or 0.0,
-                sl=_cell_f64(row[8]),
-                tp=_cell_f64(row[9]),
-                margin=_cell_f64(row[10]),
-                commission=_cell_f64(row[11]) or 0.0,
-                swap=_cell_f64(row[12]) or 0.0,
-                rollover=_cell_f64(row[13]) or 0.0,
-                gross_pl=_cell_f64(row[14]) or 0.0,
-                comment=comment,
+                position_id=position_id,
+                symbol=_cell_str(row[col["Ticker"]]),
+                side=side,
+                volume=_cell_f64(row[col["Volume"]]) or 0.0,
+                open_time=_cell_datetime(row[col["Open time (UTC)"]]),
+                open_price=_cell_f64(row[col["Open price"]]) or 0.0,
+                market_price=_cell_f64(row[col["Current price"]]) or 0.0,
+                # Value = Volume x Current price (valeur au moment du rapport,
+                # pas coût d'acquisition) -- choix assumé, pas Volume x Open price.
+                purchase_value=_cell_f64(row[col["Value"]]) or 0.0,
+                sl=_cell_f64(row[col["Stop Loss"]]),
+                tp=_cell_f64(row[col["Take Profit"]]),
+                margin=_cell_f64(row[col["Margin"]]),
+                commission=_cell_f64(row[col["Open Commission"]]) or 0.0,
+                swap=_cell_f64(row[col["Swap"]]) or 0.0,
+                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
+                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
+                comment=None,  # colonne "Comment" absente du nouvel export
+                source_file=source_file,
+            ))
+        return out
+    finally:
+        wb.close()
+
+
+# Mapping des types d'opération 'Cash Operations' -> TransactionKind. Si un
+# nouveau type apparaît dans un futur export, parse_cash_operations lève une
+# ValueError explicite plutôt que de l'ignorer silencieusement -- l'ajouter
+# ici quand il se présente.
+_CASH_KIND_MAP: dict[str, TransactionKind] = {
+    "Deposit": TransactionKind.DEPOSITE,
+    "Free funds interest": TransactionKind.DEPOSITE,
+    "Stock purchase": TransactionKind.WITHDRAW,     # jambe cash de l'achat -- le titre est déjà géré par parse_open_positions/parse_closed_positions
+    "Stock sell": TransactionKind.DEPOSITE,         # jambe cash de la vente -- idem
+    "Dividend": TransactionKind.DEPOSITE,
+    "Withholding tax": TransactionKind.FEE,         # retenue à la source sur dividende
+    "Tax IFTT": TransactionKind.FEE,                # taxe française sur transactions financières
+    "Fractional shares": TransactionKind.DEPOSITE,  # compensation cash pour rompus d'actions
+}
+
+# Ignoré : mouvement interne entre sous-comptes XTB, pas une entrée/sortie
+# réelle de patrimoine -- le cash reste détenu, juste ailleurs. Vu sur les
+# deux comptes (négatif côté principal "transfer out", positif côté PEA
+# "transfer in").
+_SKIP_CASH_TYPES = {"PEA deposit"}
+
+
+def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) -> list[Transaction]:
+    """Parse l'onglet 'Cash Operations' d'un export XTB xlsx en transactions
+    de cash EUR (dépôts, dividendes, taxes, achats/ventes de titres...). Les
+    virements internes entre sous-comptes XTB (_SKIP_CASH_TYPES) sont ignorés."""
+    source_file = str(path)
+    wb = openpyxl.load_workbook(path, read_only=False, data_only=True)
+    try:
+        sheet = wb[sheet_name]
+        rows = list(sheet.iter_rows(values_only=True))
+        header_idx = _find_header_row(rows, "ID")
+        col = _column_map(rows[header_idx])
+        out: list[Transaction] = []
+
+        eur_asset_id = registry.find_or_create(
+            "EUR", "Euro", AssetKind.CASH, "EUR", AssetIdentifiers(),
+        )
+
+        for row in rows[header_idx + 1:]:
+            op_type = _cell_str(row[col["Type"]])
+            if not op_type or op_type == "Total":
+                continue
+            if op_type in _SKIP_CASH_TYPES:
+                continue
+
+            kind = _CASH_KIND_MAP.get(op_type)
+            if kind is None:
+                raise ValueError(f"Type d'opération Cash non géré: {op_type!r}")
+
+            amount = _cell_f64(row[col["Amount"]]) or 0.0
+            op_id = _cell_str(row[col["ID"]])
+
+            out.append(Transaction(
+                platform=Platform.XTB,
+                account_label="XTB",
+                kind=kind,
+                asset_id=eur_asset_id,
+                quantity=abs(amount),
+                price=1.0,
+                value_eur=abs(amount),
+                amount=amount,
+                quote_currency="EUR",
+                time=_cell_datetime(row[col["Time"]]),
+                external_id=f"xtb-cash-{op_id}",
+                remark=_cell_str(row[col["Comment"]]) or None,
                 source_file=source_file,
             ))
         return out
