@@ -25,14 +25,14 @@ store/wallet_store.py) garantit qu'un même fichier réimporté ne crée pas
 de doublons.
 """
 
-import os
 from pathlib import Path
 
 from .parse import binance, xtb, manual
 from .store.serialize import TxStore, load_wallet, save_wallet
-from .ledger.positions import holdings_at
-from .schema import Platform
-from .market import resolve_ticker 
+from .schema import Platform, AssetKind
+from .market.tickers import resolve_ticker 
+from .ledger.portfolio import portfolio_snapshot_at
+from datetime import datetime, timezone
 
 DATA_DIR = "./data/raw"
 MANUAL_PATH = Path(DATA_DIR, "manual_tx.json")
@@ -141,11 +141,23 @@ def main():
             failed += 1
     
     save_wallet(tx_store, TX_STORE_PATH)
-    print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(tx_store.transactions)} transaction(s) au total)")
+  
+    
+    print("\n=== VALORISATION ACTUELLE ===")
+    snapshot = portfolio_snapshot_at(tx_store)
+    print(f"Date: {snapshot['date']}")
+    print(f"Valeur totale: {snapshot['total_value_eur']:,.2f} EUR")
+    print("Détail par actif:")
 
-    holdings = holdings_at(tx_store=tx_store)
-    filtre = {k: v for k, v in holdings.items() if v > 0}
-    print(filtre)
+    for asset in snapshot['assets']:
+        if asset['value_eur'] > 0.01: # On cache les poussières
+            print(f"  - {asset['symbol']:<10} ({asset['kind']:<6}) | Qty: {asset['quantity']:<10.4f} | Prix: {asset['price_eur']:<10.2f} | Valeur: {asset['value_eur']:>10,.2f} EUR")
+
+    # Exemple à une date passée :
+    print("\n=== VALORISATION AU 01 JANVIER 2024 ===")
+    past_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    past_snapshot = portfolio_snapshot_at(tx_store, past_date)
+    print(f"Valeur totale: {past_snapshot['total_value_eur']:,.2f} EUR")
 
 if __name__ == "__main__":
     main()
@@ -350,6 +362,71 @@ def compute_fifo(tx_store: TxStore, at: Optional[datetime] = None) -> CostBasisR
 
 ################################################################################
 # Dossier : src/ledger
+# Fichier : portfolio.py
+# Chemin relatif : ledger/portfolio.py
+################################################################################
+
+"""Calcul de la valorisation du portefeuille à une date donnée.
+Combine les positions (quantités) avec les prix de marché historiques.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Optional
+
+from ..store.serialize import TxStore
+from .positions import holdings_at
+from ..market.prices import historical_price_eur
+from ..schema import AssetKind
+
+def portfolio_snapshot_at(tx_store: TxStore, at: Optional[datetime] = None) -> dict:
+    if at is None:
+        at = datetime.now(timezone.utc)
+    elif at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+
+    holdings = holdings_at(tx_store, at)
+    total_value_eur = 0.0
+    details = []
+
+    for symbol, quantity in holdings.items():
+        if abs(quantity) < 1e-12:
+            continue
+
+        asset = tx_store.assets.get(symbol)
+        ticker = asset.identifiers.ticker if asset else None
+        kind = asset.kind if asset else AssetKind.CRYPTO  # Fallback défensif
+
+        price_eur = 0.0
+        try:
+            # On passe le kind et le ticker
+            price_eur = historical_price_eur(symbol, at, kind, ticker)
+        except Exception as e:
+            print(f"  [WARN] Impossible d'évaluer {symbol} au {at.strftime('%Y-%m-%d')}: {e}")
+            
+        value_eur = quantity * price_eur
+        total_value_eur += value_eur
+
+        details.append({
+            "symbol": symbol,
+            "quantity": quantity,
+            "price_eur": price_eur,
+            "value_eur": value_eur,
+            "kind": kind.value if hasattr(kind, 'value') else str(kind),
+            "ticker": ticker
+        })
+
+    details.sort(key=lambda x: x["value_eur"], reverse=True)
+
+    return {
+        "date": at.strftime("%Y-%m-%d"),
+        "total_value_eur": total_value_eur,
+        "assets": details
+    }
+
+################################################################################
+# Dossier : src/ledger
 # Fichier : positions.py
 # Chemin relatif : ledger/positions.py
 ################################################################################
@@ -432,21 +509,22 @@ def non_zero_holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Di
 ################################################################################
 
 """Équivalent Python de pf_price::historical_price_eur.
-Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide,
-aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
+Utilise l'API publique de Binance pour la crypto, et Yahoo Finance pour les actions.
 """
 
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from typing import Optional
 
 import requests
 
-# L'endpoint public de Binance pour les données de marché (évite les blocages régionaux)
-_BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
+from ..schema import AssetKind
 
+_BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
+_YAHOO_CHART_API = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 
 class PriceError(RuntimeError):
     pass
@@ -454,51 +532,63 @@ class PriceError(RuntimeError):
 
 @lru_cache(maxsize=4096)
 def _binance_klines(symbol_pair: str, day_str: str) -> list:
-    """Récupère la bougie journalière (klines) pour une paire donnée.
-    day_str au format YYYY-MM-DD."""
-    # On convertit la date en timestamp millisecondes (début de journée UTC)
+    time.sleep(0.1)
     dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start_ms = int(dt.timestamp() * 1000)
 
-    # On introduit un tout petit délai (0.1s) pour être poli avec l'API
-    time.sleep(0.1)
-
     resp = requests.get(
         _BINANCE_API,
-        params={
-            "symbol": symbol_pair,
-            "interval": "1d",  # Bougie journalière
-            "startTime": start_ms,
-            "limit": 1         # On ne veut que la bougie de ce jour précis
-        },
+        params={"symbol": symbol_pair, "interval": "1d", "startTime": start_ms, "limit": 1},
         timeout=10,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def _get_price_from_binance(symbol: str, time: datetime) -> float:
-    """Tente de récupérer le prix via Binance.
-    Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
-    day_str = time.strftime("%Y-%m-%d")
+@lru_cache(maxsize=4096)
+def _yahoo_historical_price(ticker: str, day_str: str) -> tuple[float, str]:
+    """Récupère le prix de clôture et la devise via Yahoo Finance."""
+    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start_s = int(dt.timestamp())
+    end_s = int((dt + timedelta(days=1)).timestamp())
 
-    # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
+    url = _YAHOO_CHART_API.format(ticker=ticker)
+    resp = requests.get(
+        url,
+        params={"period1": start_s, "period2": end_s, "interval": "1d"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    result = data.get("chart", {}).get("result", [])
+    if not result:
+        raise PriceError(f"Yahoo n'a pas trouvé de résultat pour {ticker}")
+
+    meta = result[0].get("meta", {})
+    currency = meta.get("currency", "USD").upper()
+
+    closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    if not closes or closes[0] is None:
+        raise PriceError(f"Pas de prix de clôture pour {ticker} au {day_str}")
+
+    return float(closes[0]), currency
+
+
+def _get_price_from_binance(symbol: str, time: datetime) -> float:
+    day_str = time.strftime("%Y-%m-%d")
     try:
         data = _binance_klines(f"{symbol}EUR", day_str)
         if data and len(data) > 0:
-            # data[0] = bougie du jour. Index 4 = prix de clôture (Close price)
             return float(data[0][4])
     except requests.exceptions.HTTPError as e:
-        # Si l'erreur est 400 (Bad Request), ça veut dire que la paire EUR n'existe pas
-        # Si c'est une autre erreur (réseau, 429), on lève l'exception
         if e.response.status_code != 400:
             raise PriceError(f"API Binance KO pour {symbol}EUR") from e
 
-    # Tentative 2 : Fallback sur la paire USDT (ex: LINKUSDT) + conversion EUR
     try:
         usdt_data = _binance_klines(f"{symbol}USDT", day_str)
         eurusdt_data = _binance_klines("EURUSDT", day_str)
-
         if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
             price_usdt = float(usdt_data[0][4])
             eurusdt_rate = float(eurusdt_data[0][4])
@@ -510,31 +600,50 @@ def _get_price_from_binance(symbol: str, time: datetime) -> float:
     raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
 
 
-def historical_price_eur(symbol: str, time: datetime) -> float:
-    """Retourne le prix en EUR de `symbol` à la date `time`."""
+def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: Optional[str] = None) -> float:
+    """Retourne le prix en EUR de `symbol` à la date `time` en fonction de son `kind`."""
     symbol = symbol.upper()
 
-    # Gestion des devises fiat et stablecoins
-    if symbol in ("EUR", "EURI"):
-        return 1.0
-    if symbol in ("USD", "USDT", "USDC", "BUSD"):
-        # On pourrait appeler l'API pour le taux exact, mais un fixe suffit pour les tests
-        return 0.92
-    if symbol in ("GBP",):
-        return 1.15
+    # Gestion des devises (Cash)
+    if kind == AssetKind.CASH:
+        if symbol in ("EUR", "EURI"):
+            return 1.0
+        if symbol in ("USD", "USDT", "USDC", "BUSD"):
+            return 0.92  # Fixe, à remplacer par un vrai appel API si besoin
+        if symbol in ("GBP",):
+            return 1.15
 
-    # Assurer que la datetime a un fuseau horaire (Binance travaille en UTC)
     if time.tzinfo is None:
         time = time.replace(tzinfo=timezone.utc)
 
-    try:
-        return _get_price_from_binance(symbol, time)
-    except PriceError:
-        # Si jamais l'API bloque ou la crypto n'existe pas à cette date
-        day_str = time.strftime("%Y-%m-%d")
-        print(f"  [WARN] Prix indisponible pour {symbol} au {day_str}. Prix mis à 0.")
-        return 0.0
+    day_str = time.strftime("%Y-%m-%d")
 
+    # --- BRANCHE STOCK : YAHOO FINANCE ---
+    if kind == AssetKind.STOCK:
+        if not ticker:
+            print(f"  [WARN] Pas de ticker Yahoo pour l'action {symbol}. Prix mis à 0.")
+            return 0.0
+        try:
+            price, currency = _yahoo_historical_price(ticker, day_str)
+            if currency != "EUR":
+                fx_pair = f"EUR{currency}=X"
+                fx_price, _ = _yahoo_historical_price(fx_pair, day_str)
+                return price / fx_price
+            return price
+        except (PriceError, requests.RequestException):
+            print(f"  [WARN] Prix Yahoo indisponible pour {ticker} au {day_str}.")
+            return 0.0
+
+    # --- BRANCHE CRYPTO : BINANCE ---
+    if kind == AssetKind.CRYPTO:
+        try:
+            return _get_price_from_binance(symbol, time)
+        except PriceError:
+            print(f"  [WARN] Prix Binance indisponible pour {symbol} au {day_str}. Prix mis à 0.")
+            return 0.0
+
+    print(f"  [WARN] Type d'actif non géré pour {symbol}: {kind}")
+    return 0.0
 
 ################################################################################
 # Dossier : src/market
@@ -569,42 +678,47 @@ from ..schema import AssetKind
 _YAHOO_SEARCH_API = "https://query2.finance.yahoo.com/v1/finance/search"
 _BINANCE_EXCHANGE_INFO = "https://data-api.binance.vision/api/v3/exchangeInfo"
 
+# Mapping des suffixes XTB -> Yahoo Finance
+_XTB_TO_YAHOO_SUFFIX = {
+    ".FR": ".PA",  # Euronext Paris
+    ".NL": ".AS",  # Euronext Amsterdam
+    ".UK": ".L",   # London Stock Exchange
+    ".DE": ".DE",  # Xetra (identique)
+    ".US": "",     # Pas de suffixe pour les US (ex: MSTR.US -> MSTR)
+    ".PL": ".WA",  # Varsovie
+}
 
 @lru_cache(maxsize=1)
 def _binance_known_base_assets() -> Set[str]:
-    """Ensemble des actifs de base (baseAsset) connus de Binance, sur
-    toutes les paires listées. Un seul appel réseau, mis en cache pour
-    tout le run (et réutilisable d'un run à l'autre via lru_cache tant
-    que le process ne redémarre pas)."""
-    resp = requests.get(_BINANCE_EXCHANGE_INFO, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    return {s["baseAsset"] for s in data.get("symbols", [])}
-
+    try:
+        resp = requests.get(_BINANCE_EXCHANGE_INFO, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return {s["baseAsset"] for s in data.get("symbols", [])}
+    except requests.RequestException:
+        return set()
 
 def ticker_for_crypto(symbol: str) -> Optional[str]:
-    """Confirme que `symbol` est un actif de base connu de Binance et le
-    retourne tel quel comme ticker. None si Binance ne le connaît pas ou
-    si l'appel réseau échoue."""
-    try:
-        known = _binance_known_base_assets()
-    except requests.RequestException:
-        return None
+    known = _binance_known_base_assets()
     symbol = symbol.upper()
     return symbol if symbol in known else None
 
-
 @lru_cache(maxsize=2048)
 def ticker_for_stock(symbol: str) -> Optional[str]:
-    """Interroge la recherche Yahoo Finance pour retrouver le ticker Yahoo
-    correspondant à `symbol` (typiquement un symbole XTB avec suffixe de
-    place boursière, ex: 'CDR.PL'). Retourne le premier résultat de
-    'quotes', ou None si rien de pertinent n'est trouvé ou en cas
-    d'erreur réseau/format."""
+    symbol = symbol.upper()
+    
+    # 1. Traduire le symbole XTB en symbole Yahoo probable
+    yahoo_symbol_guess = symbol
+    for xtb_suf, yahoo_suf in _XTB_TO_YAHOO_SUFFIX.items():
+        if symbol.endswith(xtb_suf):
+            yahoo_symbol_guess = symbol[:-len(xtb_suf)] + yahoo_suf
+            break
+
+    # 2. Tentative 1 : Rechercher avec le symbole traduit
     try:
         resp = requests.get(
             _YAHOO_SEARCH_API,
-            params={"q": symbol, "quotesCount": 1, "newsCount": 0},
+            params={"q": yahoo_symbol_guess, "quotesCount": 1, "newsCount": 0},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
@@ -614,12 +728,26 @@ def ticker_for_stock(symbol: str) -> Optional[str]:
             return quotes[0].get("symbol")
     except (requests.RequestException, ValueError, KeyError):
         pass
+
+    # 3. Tentative 2 : Fallback avec le symbole original (au cas où)
+    if yahoo_symbol_guess != symbol:
+        try:
+            resp = requests.get(
+                _YAHOO_SEARCH_API,
+                params={"q": symbol, "quotesCount": 1, "newsCount": 0},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            quotes = resp.json().get("quotes", [])
+            if quotes:
+                return quotes[0].get("symbol")
+        except (requests.RequestException, ValueError, KeyError):
+            pass
+            
     return None
 
-
 def resolve_ticker(symbol: str, kind: AssetKind) -> Optional[str]:
-    """Point d'entrée unique : dispatch vers la bonne source selon le type
-    d'actif. Renvoie None pour AssetKind.CASH (pas de ticker de marché)."""
     if kind == AssetKind.CRYPTO:
         return ticker_for_crypto(symbol)
     if kind == AssetKind.STOCK:
@@ -732,7 +860,7 @@ def parse_trades(path: Path) -> list[Transaction]:
     )
 
         quote_currency = _normalize_currency(quote_symbol) or quote_symbol
-        eur_price = historical_price_eur(base_symbol, time)
+        eur_price = historical_price_eur(base_symbol, time, _asset_kind_for(base_asset))
         value_eur = base_qty * eur_price
         trade_id = _synthetic_id(
             "binance-trade", row["Time"], row["Pair"], row["Side"],
@@ -762,7 +890,7 @@ def parse_trades(path: Path) -> list[Transaction]:
             identifiers=AssetIdentifiers(),
         )
             # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
-            fee_price_eur = historical_price_eur(fee_symbol, time)
+            fee_price_eur = historical_price_eur(fee_symbol, time, _asset_kind_for(fee_symbol))
             fee_value_eur = fee_amount * fee_price_eur
 
             out.append(Transaction(
@@ -811,8 +939,8 @@ def parse_converts(path: Path) -> list[Transaction]:
             ref_currency=_normalize_currency(buy_symbol) or "USD", identifiers=AssetIdentifiers(),
         )
 
-        sell_price_eur = historical_price_eur(sell_symbol, time)
-        buy_price_eur = historical_price_eur(buy_symbol, time)
+        sell_price_eur = historical_price_eur(sell_symbol, time, _asset_kind_for(sell_symbol))
+        buy_price_eur = historical_price_eur(buy_symbol, time,_asset_kind_for(buy_symbol))
         buy_value_eur = buy_qty * buy_price_eur
         sell_value_eur = sell_qty * sell_price_eur
 
