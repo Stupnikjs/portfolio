@@ -29,37 +29,37 @@ import os
 from pathlib import Path
 
 from .parse import binance, xtb, manual
-from .registry import AssetRegistry
 from .store.serialize import TxStore, load_wallet, save_wallet
 from .ledger.positions import holdings_at
 from .schema import Platform
+from .market import resolve_ticker 
 
 DATA_DIR = "./data/raw"
 MANUAL_PATH = Path(DATA_DIR, "manual_tx.json")
 TX_STORE_PATH = Path("./data/tx_store.json")
 ACCOUNTS_PATH = Path(DATA_DIR, "accounts")
 
-def _parse_binance(registry: AssetRegistry) -> list:
+def _parse_binance() -> list:
     out = []
     trades_path = Path(ACCOUNTS_PATH, "trades.csv")
     converts_path = Path(ACCOUNTS_PATH, "convert.csv")
 
     if trades_path.exists():
         print(f"Lecture Binance Trades : {trades_path}")
-        out += binance.parse_trades(trades_path, registry)
+        out += binance.parse_trades(trades_path)
     else:
         print(f"[Omis] Fichier introuvable : {trades_path}")
 
     if converts_path.exists():
         print(f"Lecture Binance Converts : {converts_path}")
-        out += binance.parse_converts(converts_path, registry)
+        out += binance.parse_converts(converts_path)
     else:
         print(f"[Omis] Fichier introuvable : {converts_path}")
 
     return out
 
 
-def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
+def _parse_xtb_file(path: Path) -> list:
     out = []
     if not path.exists():
         print(f"[Omis] Fichier introuvable : {path}")
@@ -69,20 +69,20 @@ def _parse_xtb_file(path: Path, registry: AssetRegistry) -> list:
     try:
         closed_sheet = xtb.find_sheet_by_prefix(path, "Closed Position")
         tx_closed = xtb.parse_closed_positions(path, closed_sheet)
-        out += [tx for pos in tx_closed for tx in pos.to_transactions(registry)]
+        out += [tx for pos in tx_closed for tx in pos.to_transactions()]
     except ValueError as e:
         print(f"  [Erreur XTB Closed] {e}")
 
     try:
         open_sheet = xtb.find_sheet_by_prefix(path, "Open Position")
         tx_open = xtb.parse_open_positions(path, open_sheet)
-        out += [pos.to_transaction(registry) for pos in tx_open]
+        out += [pos.to_transaction() for pos in tx_open]
     except ValueError as e:
         print(f"  [Erreur XTB Open] {e}")
 
     try:
         cash_sheet = xtb.find_sheet_by_prefix(path, "Cash")
-        out += xtb.parse_cash_operations(path, cash_sheet, registry)
+        out += xtb.parse_cash_operations(path, cash_sheet)
     except ValueError as e:
         print(f"  [Erreur XTB Cash] {e}")
 
@@ -96,28 +96,56 @@ def main():
     print(f"Wallet chargé : {len(tx_store.transactions)} transaction(s) existante(s)")
 
 
-    source_registry = AssetRegistry()
-
     new_transactions = []
     xtb_tx = []
-    new_transactions += _parse_binance(source_registry)
-    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account.xlsx"), source_registry)
-    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account_pea.xlsx"), source_registry)
+    new_transactions += _parse_binance()
+    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account.xlsx") )
+    xtb_tx += _parse_xtb_file(Path(ACCOUNTS_PATH, "account_pea.xlsx") )
 
     
-    _ = tx_store.add_transactions(new_transactions, source_registry)
-    _ = tx_store.add_transactions(xtb_tx, source_registry)
-    replaced = tx_store.replace_platform(Platform.XTB, xtb_tx, source_registry)
+    _ = tx_store.add_transactions(new_transactions)
+    _ = tx_store.add_transactions(xtb_tx)
+    replaced = tx_store.replace_platform(Platform.XTB, xtb_tx)
     print(f"XTB : {replaced} transaction(s) (remplacement complet)")
 
-    manual_tx = manual.parse_manual(MANUAL_PATH, source_registry)
-    replaced = tx_store.replace_platform(Platform.MANUAL, manual_tx, source_registry)
+    manual_tx = manual.parse_manual(MANUAL_PATH)
+    replaced = tx_store.replace_platform(Platform.MANUAL, manual_tx)
 
+
+    # ---------------------------------------------------------
+    # RÉSOLUTION DES TICKERS MANQUANTS
+    # On parcourt les actifs connus du wallet. S'ils n'ont pas encore
+    # de ticker résolé (et ne sont pas du Cash), on interroge les APIs.
+    # ---------------------------------------------------------
+    print("\n=== RÉSOLUTION DES TICKERS ===")
+    resolved = 0
+    skipped = 0
+    failed = 0
+    
+    for symbol, asset in tx_store.assets.items():
+        if asset.kind == AssetKind.CASH:
+            skipped += 1
+            continue
+            
+        if asset.identifiers.ticker:
+            skipped += 1
+            continue
+            
+        ticker = resolve_ticker(symbol, asset.kind)
+        if ticker:
+            asset.identifiers.ticker = ticker
+            print(f"  ✓ {symbol:<12} -> {ticker}")
+            resolved += 1
+        else:
+            print(f"  ✗ {symbol:<12} : ticker introuvable")
+            failed += 1
+    
     save_wallet(tx_store, TX_STORE_PATH)
     print(f"Wallet sauvegardé : {TX_STORE_PATH} ({len(tx_store.transactions)} transaction(s) au total)")
 
     holdings = holdings_at(tx_store=tx_store)
-    print(holdings)
+    filtre = {k: v for k, v in holdings.items() if v > 0}
+    print(filtre)
 
 if __name__ == "__main__":
     main()
@@ -161,7 +189,7 @@ from datetime import datetime
 from typing import Deque, Dict, List, Optional
 
 from ..schema import TransactionKind
-from ..store.serialize import Wallet
+from ..store.serialize import TxStore
 
 
 def _unit_value_eur(quantity: float, value_eur: float) -> float:
@@ -227,7 +255,7 @@ class CostBasisResult:
         return sum(self.fees_eur_by_symbol.values())
 
 
-def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResult:
+def compute_fifo(tx_store: TxStore, at: Optional[datetime] = None) -> CostBasisResult:
     """Rejoue les transactions du wallet dans l'ordre chronologique et
     applique la méthode FIFO : chaque SELL/WITHDRAW consomme les lots
     BUY/DEPOSITE les plus anciens en premier.
@@ -251,13 +279,13 @@ def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResu
     realized: List[RealizedGain] = []
     fees: Dict[str, float] = {}
 
-    transactions = sorted(wallet.transactions, key=lambda t: t.time)
+    transactions = sorted(tx_store.transactions, key=lambda t: t.time)
 
     for tx in transactions:
         if at is not None and tx.time > at:
             break
 
-        symbol = wallet.registry.get_asset(tx.asset_id).symbol
+        symbol = tx.asset.symbol
 
         if tx.kind in (TransactionKind.BUY, TransactionKind.DEPOSITE):
             queue = lots.setdefault(symbol, deque())
@@ -369,7 +397,7 @@ def holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Dict[str, f
         if at is not None and tx.time > at:
             break
 
-        symbol = tx_store.registry.get_asset(tx.asset_id).symbol
+        symbol = tx.asset.symbol
         sign = _SIGN.get(tx.kind)
         if sign is None:
             raise ValueError(f"TransactionKind non géré dans holdings_at: {tx.kind}")
@@ -388,6 +416,215 @@ def non_zero_holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Di
     pratique pour n'afficher que ce qui est réellement détenu."""
     return {symbol: qty for symbol, qty in holdings_at(tx_store, at).items() if qty != 0.0}
 
+
+################################################################################
+# Dossier : src/market
+# Fichier : __init__.py
+# Chemin relatif : market/__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src/market
+# Fichier : prices.py
+# Chemin relatif : market/prices.py
+################################################################################
+
+"""Équivalent Python de pf_price::historical_price_eur.
+Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide,
+aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
+"""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from functools import lru_cache
+
+import requests
+
+# L'endpoint public de Binance pour les données de marché (évite les blocages régionaux)
+_BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
+
+
+class PriceError(RuntimeError):
+    pass
+
+
+@lru_cache(maxsize=4096)
+def _binance_klines(symbol_pair: str, day_str: str) -> list:
+    """Récupère la bougie journalière (klines) pour une paire donnée.
+    day_str au format YYYY-MM-DD."""
+    # On convertit la date en timestamp millisecondes (début de journée UTC)
+    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start_ms = int(dt.timestamp() * 1000)
+
+    # On introduit un tout petit délai (0.1s) pour être poli avec l'API
+    time.sleep(0.1)
+
+    resp = requests.get(
+        _BINANCE_API,
+        params={
+            "symbol": symbol_pair,
+            "interval": "1d",  # Bougie journalière
+            "startTime": start_ms,
+            "limit": 1         # On ne veut que la bougie de ce jour précis
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_price_from_binance(symbol: str, time: datetime) -> float:
+    """Tente de récupérer le prix via Binance.
+    Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
+    day_str = time.strftime("%Y-%m-%d")
+
+    # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
+    try:
+        data = _binance_klines(f"{symbol}EUR", day_str)
+        if data and len(data) > 0:
+            # data[0] = bougie du jour. Index 4 = prix de clôture (Close price)
+            return float(data[0][4])
+    except requests.exceptions.HTTPError as e:
+        # Si l'erreur est 400 (Bad Request), ça veut dire que la paire EUR n'existe pas
+        # Si c'est une autre erreur (réseau, 429), on lève l'exception
+        if e.response.status_code != 400:
+            raise PriceError(f"API Binance KO pour {symbol}EUR") from e
+
+    # Tentative 2 : Fallback sur la paire USDT (ex: LINKUSDT) + conversion EUR
+    try:
+        usdt_data = _binance_klines(f"{symbol}USDT", day_str)
+        eurusdt_data = _binance_klines("EURUSDT", day_str)
+
+        if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
+            price_usdt = float(usdt_data[0][4])
+            eurusdt_rate = float(eurusdt_data[0][4])
+            if eurusdt_rate > 0:
+                return price_usdt / eurusdt_rate
+    except Exception as e:
+        raise PriceError(f"Pas de prix USDT/EUR pour {symbol}") from e
+
+    raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
+
+
+def historical_price_eur(symbol: str, time: datetime) -> float:
+    """Retourne le prix en EUR de `symbol` à la date `time`."""
+    symbol = symbol.upper()
+
+    # Gestion des devises fiat et stablecoins
+    if symbol in ("EUR", "EURI"):
+        return 1.0
+    if symbol in ("USD", "USDT", "USDC", "BUSD"):
+        # On pourrait appeler l'API pour le taux exact, mais un fixe suffit pour les tests
+        return 0.92
+    if symbol in ("GBP",):
+        return 1.15
+
+    # Assurer que la datetime a un fuseau horaire (Binance travaille en UTC)
+    if time.tzinfo is None:
+        time = time.replace(tzinfo=timezone.utc)
+
+    try:
+        return _get_price_from_binance(symbol, time)
+    except PriceError:
+        # Si jamais l'API bloque ou la crypto n'existe pas à cette date
+        day_str = time.strftime("%Y-%m-%d")
+        print(f"  [WARN] Prix indisponible pour {symbol} au {day_str}. Prix mis à 0.")
+        return 0.0
+
+
+################################################################################
+# Dossier : src/market
+# Fichier : tickers.py
+# Chemin relatif : market/tickers.py
+################################################################################
+
+"""src/tickers.py
+
+Résolution du ticker externe (AssetIdentifiers.ticker) pour un Asset :
+- STOCK  -> recherche Yahoo Finance (endpoint non officiel), utile car le
+  symbole XTB (ex: 'CDR.PL') ne correspond pas forcément à la notation
+  Yahoo (ex: 'CDR.WA' pour la Bourse de Varsovie).
+- CRYPTO -> API publique Binance (exchangeInfo, déjà utilisée dans
+  prices.py) : confirme que le symbole est bien un actif de base coté sur
+  Binance et renvoie ce même symbole comme ticker.
+
+Best-effort : toute erreur réseau/format renvoie None plutôt que de
+lever une exception -- un ticker manquant ne doit jamais bloquer le
+pipeline de construction du wallet.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Optional, Set
+
+import requests
+
+from ..schema import AssetKind
+
+_YAHOO_SEARCH_API = "https://query2.finance.yahoo.com/v1/finance/search"
+_BINANCE_EXCHANGE_INFO = "https://data-api.binance.vision/api/v3/exchangeInfo"
+
+
+@lru_cache(maxsize=1)
+def _binance_known_base_assets() -> Set[str]:
+    """Ensemble des actifs de base (baseAsset) connus de Binance, sur
+    toutes les paires listées. Un seul appel réseau, mis en cache pour
+    tout le run (et réutilisable d'un run à l'autre via lru_cache tant
+    que le process ne redémarre pas)."""
+    resp = requests.get(_BINANCE_EXCHANGE_INFO, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    return {s["baseAsset"] for s in data.get("symbols", [])}
+
+
+def ticker_for_crypto(symbol: str) -> Optional[str]:
+    """Confirme que `symbol` est un actif de base connu de Binance et le
+    retourne tel quel comme ticker. None si Binance ne le connaît pas ou
+    si l'appel réseau échoue."""
+    try:
+        known = _binance_known_base_assets()
+    except requests.RequestException:
+        return None
+    symbol = symbol.upper()
+    return symbol if symbol in known else None
+
+
+@lru_cache(maxsize=2048)
+def ticker_for_stock(symbol: str) -> Optional[str]:
+    """Interroge la recherche Yahoo Finance pour retrouver le ticker Yahoo
+    correspondant à `symbol` (typiquement un symbole XTB avec suffixe de
+    place boursière, ex: 'CDR.PL'). Retourne le premier résultat de
+    'quotes', ou None si rien de pertinent n'est trouvé ou en cas
+    d'erreur réseau/format."""
+    try:
+        resp = requests.get(
+            _YAHOO_SEARCH_API,
+            params={"q": symbol, "quotesCount": 1, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        quotes = resp.json().get("quotes", [])
+        if quotes:
+            return quotes[0].get("symbol")
+    except (requests.RequestException, ValueError, KeyError):
+        pass
+    return None
+
+
+def resolve_ticker(symbol: str, kind: AssetKind) -> Optional[str]:
+    """Point d'entrée unique : dispatch vers la bonne source selon le type
+    d'actif. Renvoie None pour AssetKind.CASH (pas de ticker de marché)."""
+    if kind == AssetKind.CRYPTO:
+        return ticker_for_crypto(symbol)
+    if kind == AssetKind.STOCK:
+        return ticker_for_stock(symbol)
+    return None
 
 ################################################################################
 # Dossier : src/parse
@@ -414,9 +651,8 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..prices import historical_price_eur
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..market.prices import historical_price_eur
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 _AMOUNT_RE = re.compile(r"^([0-9.]+)([A-Za-z]+)$")
 
@@ -462,7 +698,7 @@ def _asset_kind_for(symbol: str) -> AssetKind:
     return AssetKind.CASH if _normalize_currency(symbol) is not None else AssetKind.CRYPTO
 
 
-def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_trades(path: Path) -> list[Transaction]:
     """Parse un export Binance 'Trade History' en transactions Buy/Sell + Fee.
 
     Seule source Binance retenue -- le format 'Account Statement' est abandonné
@@ -489,10 +725,11 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             raise ValueError(f"side inconnu: {side}")
 
         base_ref_currency = _normalize_currency(base_symbol) or "USD"
-        base_asset_id = registry.find_or_create(
-            base_symbol, base_symbol, _asset_kind_for(base_symbol),
-            base_ref_currency, AssetIdentifiers(),
-        )
+        base_asset = Asset(
+        symbol=base_symbol, name=base_symbol,
+        kind=_asset_kind_for(base_symbol), ref_currency=base_ref_currency,
+        identifiers=AssetIdentifiers(),
+    )
 
         quote_currency = _normalize_currency(quote_symbol) or quote_symbol
         eur_price = historical_price_eur(base_symbol, time)
@@ -505,7 +742,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label="Spot",
             kind=kind,
-            asset_id=base_asset_id,
+            asset=base_asset,
             quantity=base_qty,
             price=eur_price,
             amount=quote_amount,
@@ -519,10 +756,11 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         if fee_amount > 0.0:
             fee_ref_currency = _normalize_currency(fee_symbol) or "USD"
-            fee_asset_id = registry.find_or_create(
-                fee_symbol, fee_symbol, _asset_kind_for(fee_symbol),
-                fee_ref_currency, AssetIdentifiers(),
-            )
+            fee_asset = Asset(
+            symbol=fee_symbol, name=fee_symbol,
+            kind=_asset_kind_for(fee_symbol), ref_currency=fee_ref_currency,
+            identifiers=AssetIdentifiers(),
+        )
             # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
             fee_price_eur = historical_price_eur(fee_symbol, time)
             fee_value_eur = fee_amount * fee_price_eur
@@ -531,7 +769,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
                 platform=Platform.BINANCE,
                 account_label="Spot",
                 kind=TransactionKind.FEE,
-                asset_id=fee_asset_id,
+                asset=fee_asset,
                 quantity=fee_amount,
                 price=eur_price,
                 amount=None,
@@ -546,7 +784,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
     return out
 
 
-def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_converts(path: Path) -> list[Transaction]:
     """Parse un export Binance 'Convert History'. Chaque ligne réussie devient
     deux transactions (Sell de l'actif cédé, Buy de l'actif reçu) -- les
     conversions échouées/annulées (Status != 'Successful') sont ignorées.
@@ -564,13 +802,13 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
         sell_qty, sell_symbol = _split_space_amount(row["Sell"])
         buy_qty, buy_symbol = _split_space_amount(row["Buy"])
 
-        sell_asset_id = registry.find_or_create(
-            sell_symbol, sell_symbol, _asset_kind_for(sell_symbol),
-            _normalize_currency(sell_symbol) or "USD", AssetIdentifiers(),
+        sell_asset = Asset(
+            symbol=sell_symbol, name=sell_symbol, kind=_asset_kind_for(sell_symbol),
+                      ref_currency=_normalize_currency(sell_symbol) or "USD", identifiers=AssetIdentifiers(),
         )
-        buy_asset_id = registry.find_or_create(
-            buy_symbol, buy_symbol, _asset_kind_for(buy_symbol),
-            _normalize_currency(buy_symbol) or "USD", AssetIdentifiers(),
+        buy_asset = Asset(
+            symbol=buy_symbol, name=buy_symbol, kind=_asset_kind_for(buy_symbol),
+            ref_currency=_normalize_currency(buy_symbol) or "USD", identifiers=AssetIdentifiers(),
         )
 
         sell_price_eur = historical_price_eur(sell_symbol, time)
@@ -586,7 +824,7 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
             kind=TransactionKind.SELL,
-            asset_id=sell_asset_id,
+            asset=sell_asset,
             quantity=sell_qty,
             price=sell_price_eur,
             amount=sell_value_eur,
@@ -601,7 +839,7 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
             kind=TransactionKind.BUY,
-            asset_id=buy_asset_id,
+            asset=buy_asset,
             quantity=buy_qty,
             price=buy_price_eur,
             amount=buy_value_eur,
@@ -634,15 +872,14 @@ from pathlib import Path
 from datetime import datetime
 
 from .binance import _synthetic_id
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
 def _parse_time(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
-def parse_manual(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_manual(path: Path) -> list[Transaction]:
     if not path.exists():
         return []
 
@@ -651,16 +888,15 @@ def parse_manual(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
     for entry in entries:
         symbol = entry["asset"]
-        asset_id = registry.find_or_create(
-            symbol, symbol, AssetKind.CRYPTO, "EUR", AssetIdentifiers(),
-        )
+        asset = Asset(symbol=symbol, name=symbol, kind=AssetKind.CRYPTO,
+                      ref_currency="EUR", identifiers=AssetIdentifiers())
         raw_id = entry.get("id") or _synthetic_id("manual-auto", json.dumps(entry, sort_keys=True))
 
         out.append(Transaction(
             platform=Platform.MANUAL,
             account_label=entry.get("account_label", "Manuel"),
             kind=TransactionKind(entry["kind"]),
-            asset_id=asset_id,
+            asset=asset,
             quantity=float(entry["quantity"]),
             price=entry.get("price"),
             value_eur=float(entry["value_eur"]),
@@ -691,8 +927,8 @@ from typing import Optional
 
 import openpyxl
 
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
 @dataclass
@@ -718,22 +954,22 @@ class XtbClosedPosition:
     gross_pl: float
     source_file: str
 
-    def to_transactions(self, registry: AssetRegistry) -> list[Transaction]:
+    def to_transactions(self) -> list[Transaction]:
         currency = _infer_currency(self.symbol)
-        asset_id = registry.find_or_create(
-            self.symbol, self.symbol, AssetKind.STOCK, currency, AssetIdentifiers(),
-        )
+        asset = Asset(symbol=self.symbol, name=self.symbol,
+                  kind=AssetKind.STOCK, ref_currency=currency,
+                  identifiers=AssetIdentifiers())
         return [
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
-                asset_id=asset_id, quantity=self.volume, price=self.open_price,
+                asset=asset, quantity=self.volume, price=self.open_price,
                 amount=self.purchase_value, quote_currency=None, time=self.open_time,
                 value_eur=self.purchase_value,
                 external_id=f"{self.position_id}-buy", remark=None, source_file=self.source_file,
             ),
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.SELL,
-                asset_id=asset_id, quantity=self.volume, price=self.close_price,
+                asset=asset, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
                 external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
@@ -761,14 +997,14 @@ class XtbOpenPosition:
     comment: Optional[str]
     source_file: str
 
-    def to_transaction(self, registry: AssetRegistry) -> Transaction:
+    def to_transaction(self) -> Transaction:
         currency = _infer_currency(self.symbol)
-        asset_id = registry.find_or_create(
-            self.symbol, self.symbol, AssetKind.STOCK, currency, AssetIdentifiers(),
-        )
+        asset = Asset(symbol=self.symbol, name=self.symbol,
+                  kind=AssetKind.STOCK, ref_currency=currency,
+                  identifiers=AssetIdentifiers())
         return Transaction(
             platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
-            asset_id=asset_id, quantity=self.volume, price=self.open_price,
+            asset=asset, quantity=self.volume, price=self.open_price,
             amount=self.purchase_value, quote_currency=None, time=self.open_time,
             value_eur=self.purchase_value,
             external_id=self.position_id, remark=self.comment, source_file=self.source_file,
@@ -962,7 +1198,7 @@ _CASH_KIND_MAP: dict[str, TransactionKind] = {
 _SKIP_CASH_TYPES = {"PEA deposit"}
 
 
-def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) -> list[Transaction]:
+def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
     """Parse l'onglet 'Cash Operations' d'un export XTB xlsx en transactions
     de cash EUR (dépôts, dividendes, taxes, achats/ventes de titres...). Les
     virements internes entre sous-comptes XTB (_SKIP_CASH_TYPES) sont ignorés."""
@@ -975,9 +1211,7 @@ def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) 
         col = _column_map(rows[header_idx])
         out: list[Transaction] = []
 
-        eur_asset_id = registry.find_or_create(
-            "EUR", "Euro", AssetKind.CASH, "EUR", AssetIdentifiers(),
-        )
+        eur_asset = Asset(symbol="EUR", name="EUR", kind=AssetKind.CASH, ref_currency="EUR", identifiers=AssetIdentifiers())
 
         for row in rows[header_idx + 1:]:
             op_type = _cell_str(row[col["Type"]])
@@ -997,7 +1231,7 @@ def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) 
                 platform=Platform.XTB,
                 account_label="XTB",
                 kind=kind,
-                asset_id=eur_asset_id,
+                asset=eur_asset,
                 quantity=abs(amount),
                 price=1.0,
                 value_eur=abs(amount),
@@ -1011,180 +1245,6 @@ def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) 
         return out
     finally:
         wb.close()
-
-################################################################################
-# Dossier : src
-# Fichier : prices.py
-# Chemin relatif : prices.py
-################################################################################
-
-"""Équivalent Python de pf_price::historical_price_eur.
-Utilise l'API publique de Binance (data-api.binance.vision) -- très rapide,
-aucun rate limit strict (1200 req/min), et supporte nativement les paires EUR.
-"""
-
-from __future__ import annotations
-
-import time
-from datetime import datetime, timezone
-from functools import lru_cache
-
-import requests
-
-# L'endpoint public de Binance pour les données de marché (évite les blocages régionaux)
-_BINANCE_API = "https://data-api.binance.vision/api/v3/klines"
-
-
-class PriceError(RuntimeError):
-    pass
-
-
-@lru_cache(maxsize=4096)
-def _binance_klines(symbol_pair: str, day_str: str) -> list:
-    """Récupère la bougie journalière (klines) pour une paire donnée.
-    day_str au format YYYY-MM-DD."""
-    # On convertit la date en timestamp millisecondes (début de journée UTC)
-    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    start_ms = int(dt.timestamp() * 1000)
-
-    # On introduit un tout petit délai (0.1s) pour être poli avec l'API
-    time.sleep(0.1)
-
-    resp = requests.get(
-        _BINANCE_API,
-        params={
-            "symbol": symbol_pair,
-            "interval": "1d",  # Bougie journalière
-            "startTime": start_ms,
-            "limit": 1         # On ne veut que la bougie de ce jour précis
-        },
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _get_price_from_binance(symbol: str, time: datetime) -> float:
-    """Tente de récupérer le prix via Binance.
-    Essaie d'abord la paire directe en EUR, sinon fallback en USDT converti en EUR."""
-    day_str = time.strftime("%Y-%m-%d")
-
-    # Tentative 1 : Paire directe contre EUR (ex: BTCEUR, ETHEUR)
-    try:
-        data = _binance_klines(f"{symbol}EUR", day_str)
-        if data and len(data) > 0:
-            # data[0] = bougie du jour. Index 4 = prix de clôture (Close price)
-            return float(data[0][4])
-    except requests.exceptions.HTTPError as e:
-        # Si l'erreur est 400 (Bad Request), ça veut dire que la paire EUR n'existe pas
-        # Si c'est une autre erreur (réseau, 429), on lève l'exception
-        if e.response.status_code != 400:
-            raise PriceError(f"API Binance KO pour {symbol}EUR") from e
-
-    # Tentative 2 : Fallback sur la paire USDT (ex: LINKUSDT) + conversion EUR
-    try:
-        usdt_data = _binance_klines(f"{symbol}USDT", day_str)
-        eurusdt_data = _binance_klines("EURUSDT", day_str)
-
-        if usdt_data and eurusdt_data and len(usdt_data) > 0 and len(eurusdt_data) > 0:
-            price_usdt = float(usdt_data[0][4])
-            eurusdt_rate = float(eurusdt_data[0][4])
-            if eurusdt_rate > 0:
-                return price_usdt / eurusdt_rate
-    except Exception as e:
-        raise PriceError(f"Pas de prix USDT/EUR pour {symbol}") from e
-
-    raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
-
-
-def historical_price_eur(symbol: str, time: datetime) -> float:
-    """Retourne le prix en EUR de `symbol` à la date `time`."""
-    symbol = symbol.upper()
-
-    # Gestion des devises fiat et stablecoins
-    if symbol in ("EUR", "EURI"):
-        return 1.0
-    if symbol in ("USD", "USDT", "USDC", "BUSD"):
-        # On pourrait appeler l'API pour le taux exact, mais un fixe suffit pour les tests
-        return 0.92
-    if symbol in ("GBP",):
-        return 1.15
-
-    # Assurer que la datetime a un fuseau horaire (Binance travaille en UTC)
-    if time.tzinfo is None:
-        time = time.replace(tzinfo=timezone.utc)
-
-    try:
-        return _get_price_from_binance(symbol, time)
-    except PriceError:
-        # Si jamais l'API bloque ou la crypto n'existe pas à cette date
-        day_str = time.strftime("%Y-%m-%d")
-        print(f"  [WARN] Prix indisponible pour {symbol} au {day_str}. Prix mis à 0.")
-        return 0.0
-
-
-################################################################################
-# Dossier : src
-# Fichier : registry.py
-# Chemin relatif : registry.py
-################################################################################
-
-import hashlib
-from typing import Dict
-
-from .schema import Asset, AssetIdentifiers, AssetKind
-
-
-def _stable_asset_id(symbol: str) -> int:
-    """ID déterministe dérivé du symbole -- le même symbole produit
-    toujours le même id, indépendamment de l'ordre de parsing ou du run.
-
-    Ça élimine le besoin de remapper les asset_id d'un registre local
-    (créé à chaque exécution de cli.py) vers le registre persistant du
-    wallet : `find_or_create()` sur n'importe quel registre -- local à
-    un run, ou celui rechargé depuis wallet.json -- attribue le même id
-    au même symbole, donc `wallet.add_transactions()` peut fusionner
-    directement sans traduction d'ids.
-    """
-    digest = hashlib.sha256(symbol.encode("utf-8")).hexdigest()
-    return int(digest[:15], 16)  # 60 bits -- collision négligeable pour un nombre de symboles réaliste
-
-
-class AssetRegistry:
-    def __init__(self):
-        self._assets: Dict[int, Asset] = {}
-        self._symbol_to_id: Dict[str, int] = {}
-
-    def find_or_create(self, symbol: str, name: str, kind: AssetKind, ref_currency: str, identifiers: AssetIdentifiers) -> int:
-        if symbol in self._symbol_to_id:
-            return self._symbol_to_id[symbol]
-
-        asset_id = _stable_asset_id(symbol)
-        existing = self._assets.get(asset_id)
-        if existing is not None and existing.symbol != symbol:
-            # Collision sha256 tronquée à 60 bits : astronomiquement
-            # improbable pour un nombre de symboles réaliste (~2^60
-            # valeurs possibles), mais on préfère planter bruyamment
-            # plutôt que corrompre silencieusement un actif existant.
-            raise ValueError(
-                f"Collision d'id entre '{symbol}' et '{existing.symbol}' (id={asset_id})"
-            )
-
-        self._assets[asset_id] = Asset(
-            id=asset_id, symbol=symbol, name=name, kind=kind,
-            ref_currency=ref_currency, identifiers=identifiers
-        )
-        self._symbol_to_id[symbol] = asset_id
-        return asset_id
-
-    def get_all_assets(self):
-        return list(self._assets.values())
-
-    def get_asset(self, asset_id: int) -> Asset:
-        """Lookup par id -- nécessaire pour retrouver le symbole stable
-        d'une Transaction lors de la sérialisation vers wallet.json."""
-        return self._assets[asset_id]
-
 
 ################################################################################
 # Dossier : src/report
@@ -1247,7 +1307,6 @@ class AssetIdentifiers:
 
 @dataclass
 class Asset:
-    id: int
     symbol: str
     name: str
     kind: AssetKind
@@ -1260,7 +1319,7 @@ class Transaction:
     platform: Platform
     account_label: str
     kind: TransactionKind
-    asset_id: int
+    asset:Asset
     quantity: float
     price: Optional[float]
     value_eur: float  # immutable
@@ -1272,17 +1331,19 @@ class Transaction:
     source_file: str
 
 
-def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
-    """ID stable : le même triplet (symbol, kind, ref_currency) donne
-    toujours le même id, peu importe l'ordre de parsing ou le run."""
-    digest = hashlib.sha256(f"{kind.value}|{ref_currency}|{symbol}".encode()).hexdigest()
-    return int(digest[:15], 16)  # tient dans un int 64 bits signé
-
 
 ################################################################################
 # Dossier : src/store
 # Fichier : __init__.py
 # Chemin relatif : store/__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src/store
+# Fichier : registery.py
+# Chemin relatif : store/registery.py
 ################################################################################
 
 
@@ -1296,14 +1357,15 @@ def _asset_id(symbol: str, kind: AssetKind, ref_currency: str) -> int:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
-from ..registry import AssetRegistry
+
 from ..schema import (
     AssetIdentifiers,
+    Asset,
     AssetKind,
     Platform,
     Transaction,
@@ -1317,13 +1379,13 @@ TX_STORE_VERSION = 1
 # Sérialisation Transaction <-> dict (par symbole)
 # ---------------------------------------------------------------------------
 
-def _transaction_to_dict(tx: Transaction, registry: AssetRegistry) -> dict:
-    asset = registry.get_asset(tx.asset_id)
+def _transaction_to_dict(tx: Transaction) -> dict:
+    
     return {
         "platform": tx.platform.value,
         "account_label": tx.account_label,
         "kind": tx.kind.value,
-        "asset": asset.symbol,
+        "asset": tx.asset.symbol,
         "quantity": tx.quantity,
         "price": tx.price,
         "value_eur": tx.value_eur,
@@ -1336,21 +1398,18 @@ def _transaction_to_dict(tx: Transaction, registry: AssetRegistry) -> dict:
     }
 
 
-def _transaction_from_dict(data: dict, registry: AssetRegistry, assets_meta: Dict[str, dict]) -> Transaction:
+def _transaction_from_dict(data: dict, tx_store:TxStore,  assets_meta: Dict[str, dict]) -> Transaction:
     symbol = data["asset"]
     meta = assets_meta[symbol]
-    asset_id = registry.find_or_create(
-        symbol,
-        meta["name"],
-        AssetKind(meta["kind"]),
-        meta["ref_currency"],
-        AssetIdentifiers(**meta["identifiers"]),
+    asset = tx_store.find_or_create_asset(
+        symbol, meta["name"], AssetKind(meta["kind"]),
+        meta["ref_currency"], AssetIdentifiers(**meta["identifiers"]),
     )
     return Transaction(
         platform=Platform(data["platform"]),
         account_label=data["account_label"],
         kind=TransactionKind(data["kind"]),
-        asset_id=asset_id,
+        asset=asset,
         quantity=data["quantity"],
         price=data["price"],
         value_eur=data["value_eur"],
@@ -1368,74 +1427,57 @@ def _transaction_from_dict(data: dict, registry: AssetRegistry, assets_meta: Dic
 # ---------------------------------------------------------------------------
 
 class TxStore:
-    """État persistant du portefeuille : registre d'actifs (keyed par
-    symbole en interne) + log de transactions, source de vérité unique.
-
-    Ne jamais stocker de positions/soldes calculés ici -- ils se
-    reconstruisent à partir du log de transactions (voir portfolio/).
-    """
-
     def __init__(self) -> None:
-        self.registry = AssetRegistry()
+        self.assets: Dict[str, Asset] = {}
         self.transactions: List[Transaction] = []
         self._known_external_ids: Set[str] = set()
 
-    def add_transactions(self, new_transactions: List[Transaction], source_registry: AssetRegistry) -> int:
+    def find_or_create_asset(
+        self, symbol: str, name: str, kind: AssetKind,
+        ref_currency: str, identifiers: AssetIdentifiers,
+    ) -> Asset:
+        """Retourne l'Asset canonique pour ce symbole, le créant si besoin.
+        Si un Asset existe déjà pour ce symbole, ses métadonnées font foi
+        (comportement identique à l'ancien AssetRegistry.find_or_create)."""
+        existing = self.assets.get(symbol)
+        if existing is not None:
+            return existing
+        asset = Asset(symbol=symbol, name=name, kind=kind,
+                       ref_currency=ref_currency, identifiers=identifiers)
+        self.assets[symbol] = asset
+        return asset
+
+    def add_transactions(self, new_transactions: List[Transaction]) -> int:
         """Fusionne des transactions fraîchement parsées dans le wallet.
 
-        `source_registry` est l'AssetRegistry utilisé par les parsers pour
-        produire `new_transactions` -- ses asset_id sont locaux à ce run et
-        ne correspondent pas forcément à ceux du wallet. On les retraduit
-        via le symbole.
-
-        Les doublons (même external_id déjà connu) sont silencieusement
-        ignorés. Retourne le nombre de transactions effectivement ajoutées.
+        Chaque `tx.asset` vient d'un parseur et est une instance locale à
+        ce run : on la retraduit vers l'Asset canonique du store via le
+        symbole, puis on clone la transaction avec `dataclasses.replace`
+        pour n'avoir qu'un seul point à maintenir si Transaction gagne un
+        champ plus tard.
         """
         added = 0
         for tx in new_transactions:
             if tx.external_id is not None and tx.external_id in self._known_external_ids:
                 continue
 
-            source_asset = source_registry.get_asset(tx.asset_id)
-            local_asset_id = self.registry.find_or_create(
-                source_asset.symbol,
-                source_asset.name,
-                source_asset.kind,
-                source_asset.ref_currency,
-                source_asset.identifiers,
+            local_asset = self.find_or_create_asset(
+                tx.asset.symbol, tx.asset.name, tx.asset.kind,
+                tx.asset.ref_currency, tx.asset.identifiers,
             )
-
-            self.transactions.append(Transaction(
-                platform=tx.platform,
-                account_label=tx.account_label,
-                kind=tx.kind,
-                asset_id=local_asset_id,
-                quantity=tx.quantity,
-                price=tx.price,
-                value_eur=tx.value_eur,
-                amount=tx.amount,
-                quote_currency=tx.quote_currency,
-                time=tx.time,
-                external_id=tx.external_id,
-                remark=tx.remark,
-                source_file=tx.source_file,
-            ))
+            self.transactions.append(replace(tx, asset=local_asset))
             if tx.external_id is not None:
                 self._known_external_ids.add(tx.external_id)
             added += 1
 
         return added
-    def replace_platform(
-    self, platform: Platform, new_transactions: list[Transaction], source_registry: AssetRegistry
-    ) -> int:
-        """Remplace en bloc toutes les transactions d'une plateforme donnée
-        (utilisé pour MANUAL : le fichier source fait autorité, contrairement
-        au reste du pipeline qui est append-only par dédup d'external_id)."""
+
+    def replace_platform(self, platform: Platform, new_transactions: list[Transaction]) -> int:
         self.transactions = [tx for tx in self.transactions if tx.platform != platform]
         self._known_external_ids = {
             tx.external_id for tx in self.transactions if tx.external_id is not None
         }
-        return self.add_transactions(new_transactions, source_registry)
+        return self.add_transactions(new_transactions)
 
 
 # ---------------------------------------------------------------------------
@@ -1445,38 +1487,38 @@ class TxStore:
 def load_tx_store(path: Path) -> TxStore:
     """Charge un wallet.json existant. Retourne un Wallet vide si le fichier
     n'existe pas encore (premier import)."""
-    wallet = TxStore()
+    tx_store = TxStore()
 
     if not path.exists():
-        return wallet
+        return tx_store
 
     data = json.loads(path.read_text(encoding="utf-8"))
     assets_meta = data.get("assets", {})
 
     for tx_data in data.get("transactions", []):
-        tx = _transaction_from_dict(tx_data, wallet.registry, assets_meta)
-        wallet.transactions.append(tx)
+        tx = _transaction_from_dict(tx_data,tx_store, assets_meta)
+        tx_store.transactions.append(tx)
         if tx.external_id is not None:
-            wallet._known_external_ids.add(tx.external_id)
+            tx_store._known_external_ids.add(tx.external_id)
 
-    return wallet
+    return tx_store
 
 
 def save_wallet(tx_store: TxStore, path: Path) -> None:
     """Réécrit le wallet.json en entier (pas d'append) -- garantit un
     fichier toujours cohérent avec l'état en mémoire."""
     assets_out = {
-        asset.symbol: {
-            "name": asset.name,
-            "kind": asset.kind.value,
-            "ref_currency": asset.ref_currency,
-            "identifiers": asdict(asset.identifiers),
-        }
-        for asset in tx_store.registry.get_all_assets()
+    symbol: {
+        "name": asset.name,
+        "kind": asset.kind.value,
+        "ref_currency": asset.ref_currency,
+        "identifiers": asdict(asset.identifiers),
+    }
+    for symbol, asset in tx_store.assets.items()
     }
 
     transactions_out = [
-        _transaction_to_dict(tx, tx_store.registry) for tx in tx_store.transactions
+        _transaction_to_dict(tx) for tx in tx_store.transactions
     ]
     transactions_out.sort(key=lambda d: d["time"])  # ordre chronologique stable -> diffs git lisibles
 

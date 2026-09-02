@@ -41,7 +41,7 @@ def holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Dict[str, f
         if at is not None and tx.time > at:
             break
 
-        symbol = tx_store.registry.get_asset(tx.asset_id).symbol
+        symbol = tx.asset.symbol
         sign = _SIGN.get(tx.kind)
         if sign is None:
             raise ValueError(f"TransactionKind non géré dans holdings_at: {tx.kind}")

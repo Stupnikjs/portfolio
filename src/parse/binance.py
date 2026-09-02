@@ -9,9 +9,8 @@ import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..prices import historical_price_eur
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..market.prices import historical_price_eur
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 _AMOUNT_RE = re.compile(r"^([0-9.]+)([A-Za-z]+)$")
 
@@ -57,7 +56,7 @@ def _asset_kind_for(symbol: str) -> AssetKind:
     return AssetKind.CASH if _normalize_currency(symbol) is not None else AssetKind.CRYPTO
 
 
-def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_trades(path: Path) -> list[Transaction]:
     """Parse un export Binance 'Trade History' en transactions Buy/Sell + Fee.
 
     Seule source Binance retenue -- le format 'Account Statement' est abandonné
@@ -84,13 +83,14 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             raise ValueError(f"side inconnu: {side}")
 
         base_ref_currency = _normalize_currency(base_symbol) or "USD"
-        base_asset_id = registry.find_or_create(
-            base_symbol, base_symbol, _asset_kind_for(base_symbol),
-            base_ref_currency, AssetIdentifiers(),
-        )
+        base_asset = Asset(
+        symbol=base_symbol, name=base_symbol,
+        kind=_asset_kind_for(base_symbol), ref_currency=base_ref_currency,
+        identifiers=AssetIdentifiers(),
+    )
 
         quote_currency = _normalize_currency(quote_symbol) or quote_symbol
-        eur_price = historical_price_eur(base_symbol, time)
+        eur_price = historical_price_eur(base_symbol, time, _asset_kind_for(base_asset))
         value_eur = base_qty * eur_price
         trade_id = _synthetic_id(
             "binance-trade", row["Time"], row["Pair"], row["Side"],
@@ -100,7 +100,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label="Spot",
             kind=kind,
-            asset_id=base_asset_id,
+            asset=base_asset,
             quantity=base_qty,
             price=eur_price,
             amount=quote_amount,
@@ -114,19 +114,20 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
         if fee_amount > 0.0:
             fee_ref_currency = _normalize_currency(fee_symbol) or "USD"
-            fee_asset_id = registry.find_or_create(
-                fee_symbol, fee_symbol, _asset_kind_for(fee_symbol),
-                fee_ref_currency, AssetIdentifiers(),
-            )
+            fee_asset = Asset(
+            symbol=fee_symbol, name=fee_symbol,
+            kind=_asset_kind_for(fee_symbol), ref_currency=fee_ref_currency,
+            identifiers=AssetIdentifiers(),
+        )
             # Le prix et la valeur du fee doivent être basés sur l'actif du fee (ex: BNB), pas sur le base (ex: BTC)
-            fee_price_eur = historical_price_eur(fee_symbol, time)
+            fee_price_eur = historical_price_eur(fee_symbol, time, _asset_kind_for(fee_symbol))
             fee_value_eur = fee_amount * fee_price_eur
 
             out.append(Transaction(
                 platform=Platform.BINANCE,
                 account_label="Spot",
                 kind=TransactionKind.FEE,
-                asset_id=fee_asset_id,
+                asset=fee_asset,
                 quantity=fee_amount,
                 price=eur_price,
                 amount=None,
@@ -141,7 +142,7 @@ def parse_trades(path: Path, registry: AssetRegistry) -> list[Transaction]:
     return out
 
 
-def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_converts(path: Path) -> list[Transaction]:
     """Parse un export Binance 'Convert History'. Chaque ligne réussie devient
     deux transactions (Sell de l'actif cédé, Buy de l'actif reçu) -- les
     conversions échouées/annulées (Status != 'Successful') sont ignorées.
@@ -159,17 +160,17 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
         sell_qty, sell_symbol = _split_space_amount(row["Sell"])
         buy_qty, buy_symbol = _split_space_amount(row["Buy"])
 
-        sell_asset_id = registry.find_or_create(
-            sell_symbol, sell_symbol, _asset_kind_for(sell_symbol),
-            _normalize_currency(sell_symbol) or "USD", AssetIdentifiers(),
+        sell_asset = Asset(
+            symbol=sell_symbol, name=sell_symbol, kind=_asset_kind_for(sell_symbol),
+                      ref_currency=_normalize_currency(sell_symbol) or "USD", identifiers=AssetIdentifiers(),
         )
-        buy_asset_id = registry.find_or_create(
-            buy_symbol, buy_symbol, _asset_kind_for(buy_symbol),
-            _normalize_currency(buy_symbol) or "USD", AssetIdentifiers(),
+        buy_asset = Asset(
+            symbol=buy_symbol, name=buy_symbol, kind=_asset_kind_for(buy_symbol),
+            ref_currency=_normalize_currency(buy_symbol) or "USD", identifiers=AssetIdentifiers(),
         )
 
-        sell_price_eur = historical_price_eur(sell_symbol, time)
-        buy_price_eur = historical_price_eur(buy_symbol, time)
+        sell_price_eur = historical_price_eur(sell_symbol, time, _asset_kind_for(sell_symbol))
+        buy_price_eur = historical_price_eur(buy_symbol, time,_asset_kind_for(buy_symbol))
         buy_value_eur = buy_qty * buy_price_eur
         sell_value_eur = sell_qty * sell_price_eur
 
@@ -181,7 +182,7 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
             kind=TransactionKind.SELL,
-            asset_id=sell_asset_id,
+            asset=sell_asset,
             quantity=sell_qty,
             price=sell_price_eur,
             amount=sell_value_eur,
@@ -196,7 +197,7 @@ def parse_converts(path: Path, registry: AssetRegistry) -> list[Transaction]:
             platform=Platform.BINANCE,
             account_label=row["Wallet"],
             kind=TransactionKind.BUY,
-            asset_id=buy_asset_id,
+            asset=buy_asset,
             quantity=buy_qty,
             price=buy_price_eur,
             amount=buy_value_eur,

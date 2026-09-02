@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Deque, Dict, List, Optional
 
 from ..schema import TransactionKind
-from ..store.serialize import Wallet
+from ..store.serialize import TxStore
 
 
 def _unit_value_eur(quantity: float, value_eur: float) -> float:
@@ -88,7 +88,7 @@ class CostBasisResult:
         return sum(self.fees_eur_by_symbol.values())
 
 
-def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResult:
+def compute_fifo(tx_store: TxStore, at: Optional[datetime] = None) -> CostBasisResult:
     """Rejoue les transactions du wallet dans l'ordre chronologique et
     applique la méthode FIFO : chaque SELL/WITHDRAW consomme les lots
     BUY/DEPOSITE les plus anciens en premier.
@@ -112,13 +112,13 @@ def compute_fifo(wallet: Wallet, at: Optional[datetime] = None) -> CostBasisResu
     realized: List[RealizedGain] = []
     fees: Dict[str, float] = {}
 
-    transactions = sorted(wallet.transactions, key=lambda t: t.time)
+    transactions = sorted(tx_store.transactions, key=lambda t: t.time)
 
     for tx in transactions:
         if at is not None and tx.time > at:
             break
 
-        symbol = wallet.registry.get_asset(tx.asset_id).symbol
+        symbol = tx.asset.symbol
 
         if tx.kind in (TransactionKind.BUY, TransactionKind.DEPOSITE):
             queue = lots.setdefault(symbol, deque())

@@ -9,8 +9,8 @@ from typing import Optional
 
 import openpyxl
 
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
 @dataclass
@@ -36,22 +36,22 @@ class XtbClosedPosition:
     gross_pl: float
     source_file: str
 
-    def to_transactions(self, registry: AssetRegistry) -> list[Transaction]:
+    def to_transactions(self) -> list[Transaction]:
         currency = _infer_currency(self.symbol)
-        asset_id = registry.find_or_create(
-            self.symbol, self.symbol, AssetKind.STOCK, currency, AssetIdentifiers(),
-        )
+        asset = Asset(symbol=self.symbol, name=self.symbol,
+                  kind=AssetKind.STOCK, ref_currency=currency,
+                  identifiers=AssetIdentifiers())
         return [
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
-                asset_id=asset_id, quantity=self.volume, price=self.open_price,
+                asset=asset, quantity=self.volume, price=self.open_price,
                 amount=self.purchase_value, quote_currency=None, time=self.open_time,
                 value_eur=self.purchase_value,
                 external_id=f"{self.position_id}-buy", remark=None, source_file=self.source_file,
             ),
             Transaction(
                 platform=Platform.XTB, account_label="XTB", kind=TransactionKind.SELL,
-                asset_id=asset_id, quantity=self.volume, price=self.close_price,
+                asset=asset, quantity=self.volume, price=self.close_price,
                 amount=self.sale_value, quote_currency=None, time=self.close_time,
                 value_eur=self.sale_value,
                 external_id=f"{self.position_id}-sell", remark=None, source_file=self.source_file,
@@ -79,14 +79,14 @@ class XtbOpenPosition:
     comment: Optional[str]
     source_file: str
 
-    def to_transaction(self, registry: AssetRegistry) -> Transaction:
+    def to_transaction(self) -> Transaction:
         currency = _infer_currency(self.symbol)
-        asset_id = registry.find_or_create(
-            self.symbol, self.symbol, AssetKind.STOCK, currency, AssetIdentifiers(),
-        )
+        asset = Asset(symbol=self.symbol, name=self.symbol,
+                  kind=AssetKind.STOCK, ref_currency=currency,
+                  identifiers=AssetIdentifiers())
         return Transaction(
             platform=Platform.XTB, account_label="XTB", kind=TransactionKind.BUY,
-            asset_id=asset_id, quantity=self.volume, price=self.open_price,
+            asset=asset, quantity=self.volume, price=self.open_price,
             amount=self.purchase_value, quote_currency=None, time=self.open_time,
             value_eur=self.purchase_value,
             external_id=self.position_id, remark=self.comment, source_file=self.source_file,
@@ -280,7 +280,7 @@ _CASH_KIND_MAP: dict[str, TransactionKind] = {
 _SKIP_CASH_TYPES = {"PEA deposit"}
 
 
-def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) -> list[Transaction]:
+def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
     """Parse l'onglet 'Cash Operations' d'un export XTB xlsx en transactions
     de cash EUR (dépôts, dividendes, taxes, achats/ventes de titres...). Les
     virements internes entre sous-comptes XTB (_SKIP_CASH_TYPES) sont ignorés."""
@@ -293,9 +293,7 @@ def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) 
         col = _column_map(rows[header_idx])
         out: list[Transaction] = []
 
-        eur_asset_id = registry.find_or_create(
-            "EUR", "Euro", AssetKind.CASH, "EUR", AssetIdentifiers(),
-        )
+        eur_asset = Asset(symbol="EUR", name="EUR", kind=AssetKind.CASH, ref_currency="EUR", identifiers=AssetIdentifiers())
 
         for row in rows[header_idx + 1:]:
             op_type = _cell_str(row[col["Type"]])
@@ -315,7 +313,7 @@ def parse_cash_operations(path: Path, sheet_name: str, registry: AssetRegistry) 
                 platform=Platform.XTB,
                 account_label="XTB",
                 kind=kind,
-                asset_id=eur_asset_id,
+                asset=eur_asset,
                 quantity=abs(amount),
                 price=1.0,
                 value_eur=abs(amount),

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
-from ..registry import AssetRegistry
+
 from ..schema import (
     AssetIdentifiers,
+    Asset,
     AssetKind,
     Platform,
     Transaction,
@@ -22,13 +23,13 @@ TX_STORE_VERSION = 1
 # Sérialisation Transaction <-> dict (par symbole)
 # ---------------------------------------------------------------------------
 
-def _transaction_to_dict(tx: Transaction, registry: AssetRegistry) -> dict:
-    asset = registry.get_asset(tx.asset_id)
+def _transaction_to_dict(tx: Transaction) -> dict:
+    
     return {
         "platform": tx.platform.value,
         "account_label": tx.account_label,
         "kind": tx.kind.value,
-        "asset": asset.symbol,
+        "asset": tx.asset.symbol,
         "quantity": tx.quantity,
         "price": tx.price,
         "value_eur": tx.value_eur,
@@ -41,21 +42,18 @@ def _transaction_to_dict(tx: Transaction, registry: AssetRegistry) -> dict:
     }
 
 
-def _transaction_from_dict(data: dict, registry: AssetRegistry, assets_meta: Dict[str, dict]) -> Transaction:
+def _transaction_from_dict(data: dict, tx_store:TxStore,  assets_meta: Dict[str, dict]) -> Transaction:
     symbol = data["asset"]
     meta = assets_meta[symbol]
-    asset_id = registry.find_or_create(
-        symbol,
-        meta["name"],
-        AssetKind(meta["kind"]),
-        meta["ref_currency"],
-        AssetIdentifiers(**meta["identifiers"]),
+    asset = tx_store.find_or_create_asset(
+        symbol, meta["name"], AssetKind(meta["kind"]),
+        meta["ref_currency"], AssetIdentifiers(**meta["identifiers"]),
     )
     return Transaction(
         platform=Platform(data["platform"]),
         account_label=data["account_label"],
         kind=TransactionKind(data["kind"]),
-        asset_id=asset_id,
+        asset=asset,
         quantity=data["quantity"],
         price=data["price"],
         value_eur=data["value_eur"],
@@ -73,74 +71,57 @@ def _transaction_from_dict(data: dict, registry: AssetRegistry, assets_meta: Dic
 # ---------------------------------------------------------------------------
 
 class TxStore:
-    """État persistant du portefeuille : registre d'actifs (keyed par
-    symbole en interne) + log de transactions, source de vérité unique.
-
-    Ne jamais stocker de positions/soldes calculés ici -- ils se
-    reconstruisent à partir du log de transactions (voir portfolio/).
-    """
-
     def __init__(self) -> None:
-        self.registry = AssetRegistry()
+        self.assets: Dict[str, Asset] = {}
         self.transactions: List[Transaction] = []
         self._known_external_ids: Set[str] = set()
 
-    def add_transactions(self, new_transactions: List[Transaction], source_registry: AssetRegistry) -> int:
+    def find_or_create_asset(
+        self, symbol: str, name: str, kind: AssetKind,
+        ref_currency: str, identifiers: AssetIdentifiers,
+    ) -> Asset:
+        """Retourne l'Asset canonique pour ce symbole, le créant si besoin.
+        Si un Asset existe déjà pour ce symbole, ses métadonnées font foi
+        (comportement identique à l'ancien AssetRegistry.find_or_create)."""
+        existing = self.assets.get(symbol)
+        if existing is not None:
+            return existing
+        asset = Asset(symbol=symbol, name=name, kind=kind,
+                       ref_currency=ref_currency, identifiers=identifiers)
+        self.assets[symbol] = asset
+        return asset
+
+    def add_transactions(self, new_transactions: List[Transaction]) -> int:
         """Fusionne des transactions fraîchement parsées dans le wallet.
 
-        `source_registry` est l'AssetRegistry utilisé par les parsers pour
-        produire `new_transactions` -- ses asset_id sont locaux à ce run et
-        ne correspondent pas forcément à ceux du wallet. On les retraduit
-        via le symbole.
-
-        Les doublons (même external_id déjà connu) sont silencieusement
-        ignorés. Retourne le nombre de transactions effectivement ajoutées.
+        Chaque `tx.asset` vient d'un parseur et est une instance locale à
+        ce run : on la retraduit vers l'Asset canonique du store via le
+        symbole, puis on clone la transaction avec `dataclasses.replace`
+        pour n'avoir qu'un seul point à maintenir si Transaction gagne un
+        champ plus tard.
         """
         added = 0
         for tx in new_transactions:
             if tx.external_id is not None and tx.external_id in self._known_external_ids:
                 continue
 
-            source_asset = source_registry.get_asset(tx.asset_id)
-            local_asset_id = self.registry.find_or_create(
-                source_asset.symbol,
-                source_asset.name,
-                source_asset.kind,
-                source_asset.ref_currency,
-                source_asset.identifiers,
+            local_asset = self.find_or_create_asset(
+                tx.asset.symbol, tx.asset.name, tx.asset.kind,
+                tx.asset.ref_currency, tx.asset.identifiers,
             )
-
-            self.transactions.append(Transaction(
-                platform=tx.platform,
-                account_label=tx.account_label,
-                kind=tx.kind,
-                asset_id=local_asset_id,
-                quantity=tx.quantity,
-                price=tx.price,
-                value_eur=tx.value_eur,
-                amount=tx.amount,
-                quote_currency=tx.quote_currency,
-                time=tx.time,
-                external_id=tx.external_id,
-                remark=tx.remark,
-                source_file=tx.source_file,
-            ))
+            self.transactions.append(replace(tx, asset=local_asset))
             if tx.external_id is not None:
                 self._known_external_ids.add(tx.external_id)
             added += 1
 
         return added
-    def replace_platform(
-    self, platform: Platform, new_transactions: list[Transaction], source_registry: AssetRegistry
-    ) -> int:
-        """Remplace en bloc toutes les transactions d'une plateforme donnée
-        (utilisé pour MANUAL : le fichier source fait autorité, contrairement
-        au reste du pipeline qui est append-only par dédup d'external_id)."""
+
+    def replace_platform(self, platform: Platform, new_transactions: list[Transaction]) -> int:
         self.transactions = [tx for tx in self.transactions if tx.platform != platform]
         self._known_external_ids = {
             tx.external_id for tx in self.transactions if tx.external_id is not None
         }
-        return self.add_transactions(new_transactions, source_registry)
+        return self.add_transactions(new_transactions)
 
 
 # ---------------------------------------------------------------------------
@@ -150,38 +131,38 @@ class TxStore:
 def load_tx_store(path: Path) -> TxStore:
     """Charge un wallet.json existant. Retourne un Wallet vide si le fichier
     n'existe pas encore (premier import)."""
-    wallet = TxStore()
+    tx_store = TxStore()
 
     if not path.exists():
-        return wallet
+        return tx_store
 
     data = json.loads(path.read_text(encoding="utf-8"))
     assets_meta = data.get("assets", {})
 
     for tx_data in data.get("transactions", []):
-        tx = _transaction_from_dict(tx_data, wallet.registry, assets_meta)
-        wallet.transactions.append(tx)
+        tx = _transaction_from_dict(tx_data,tx_store, assets_meta)
+        tx_store.transactions.append(tx)
         if tx.external_id is not None:
-            wallet._known_external_ids.add(tx.external_id)
+            tx_store._known_external_ids.add(tx.external_id)
 
-    return wallet
+    return tx_store
 
 
 def save_wallet(tx_store: TxStore, path: Path) -> None:
     """Réécrit le wallet.json en entier (pas d'append) -- garantit un
     fichier toujours cohérent avec l'état en mémoire."""
     assets_out = {
-        asset.symbol: {
-            "name": asset.name,
-            "kind": asset.kind.value,
-            "ref_currency": asset.ref_currency,
-            "identifiers": asdict(asset.identifiers),
-        }
-        for asset in tx_store.registry.get_all_assets()
+    symbol: {
+        "name": asset.name,
+        "kind": asset.kind.value,
+        "ref_currency": asset.ref_currency,
+        "identifiers": asdict(asset.identifiers),
+    }
+    for symbol, asset in tx_store.assets.items()
     }
 
     transactions_out = [
-        _transaction_to_dict(tx, tx_store.registry) for tx in tx_store.transactions
+        _transaction_to_dict(tx) for tx in tx_store.transactions
     ]
     transactions_out.sort(key=lambda d: d["time"])  # ordre chronologique stable -> diffs git lisibles
 

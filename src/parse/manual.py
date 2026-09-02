@@ -10,15 +10,14 @@ from pathlib import Path
 from datetime import datetime
 
 from .binance import _synthetic_id
-from ..registry import AssetRegistry
-from ..schema import AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
+from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
 def _parse_time(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
-def parse_manual(path: Path, registry: AssetRegistry) -> list[Transaction]:
+def parse_manual(path: Path) -> list[Transaction]:
     if not path.exists():
         return []
 
@@ -27,16 +26,15 @@ def parse_manual(path: Path, registry: AssetRegistry) -> list[Transaction]:
 
     for entry in entries:
         symbol = entry["asset"]
-        asset_id = registry.find_or_create(
-            symbol, symbol, AssetKind.CRYPTO, "EUR", AssetIdentifiers(),
-        )
+        asset = Asset(symbol=symbol, name=symbol, kind=AssetKind.CRYPTO,
+                      ref_currency="EUR", identifiers=AssetIdentifiers())
         raw_id = entry.get("id") or _synthetic_id("manual-auto", json.dumps(entry, sort_keys=True))
 
         out.append(Transaction(
             platform=Platform.MANUAL,
             account_label=entry.get("account_label", "Manuel"),
             kind=TransactionKind(entry["kind"]),
-            asset_id=asset_id,
+            asset=asset,
             quantity=float(entry["quantity"]),
             price=entry.get("price"),
             value_eur=float(entry["value_eur"]),
