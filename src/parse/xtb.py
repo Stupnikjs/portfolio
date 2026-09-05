@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 import openpyxl
+import requests
 
-
+from ..market.prices import _yahoo_historical_price, _normalize_currency_for_fx, PriceError
+from ..market.tickers import resolve_ticker
 from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
@@ -101,6 +104,41 @@ def _infer_currency(symbol: str) -> str:
     }.get(suffix, "EUR")
 
 
+@lru_cache(maxsize=512)
+def _fx_rate_to_eur(currency: str, day_str: str) -> float:
+    """Facteur multiplicatif -> EUR à la date donnée, via Yahoo, en tenant
+    compte du cas pence/livre ("GBp" vs "GBP", voir _normalize_currency_for_fx).
+
+    Best-effort : en cas d'échec réseau/format, renvoie 1.0 (dégradé)
+    plutôt que de lever une exception qui casserait tout l'import.
+    """
+    if currency == "EUR":
+        return 1.0
+    fx_currency, price_factor = _normalize_currency_for_fx(currency)
+    try:
+        fx_price, _ = _yahoo_historical_price(f"EUR{fx_currency}=X", day_str)
+        return price_factor / fx_price
+    except (PriceError, requests.RequestException):
+        return 1.0
+
+
+@lru_cache(maxsize=2048)
+def _real_trading_currency(symbol: str, day_str: str) -> str:
+    """Devise de cotation RÉELLE de `symbol`, lue chez Yahoo -- ne jamais
+    la deviner depuis le suffixe XTB (ex: '.UK' ne garantit pas GBP :
+    certains ETC/ADR cotés à Londres sont en USD ; et parmi ceux qui sont
+    bien en GBP, beaucoup sont en réalité cotés en pence "GBp"). Repli sur
+    l'heuristique de suffixe si la résolution Yahoo échoue."""
+    ticker = resolve_ticker(symbol, AssetKind.STOCK)
+    if ticker:
+        try:
+            _, currency = _yahoo_historical_price(ticker, day_str)
+            return currency
+        except (PriceError, requests.RequestException):
+            pass
+    return _infer_currency(symbol)
+
+
 def find_sheet_by_prefix(path: Path, prefix: str) -> str:
     """Trouve dynamiquement le nom d'onglet commençant par un préfixe donné,
     utile pour 'OPEN POSITION <date>' dont le nom exact change à chaque export.
@@ -146,14 +184,36 @@ def _find_header_row(rows: list[tuple], required_col: str) -> int:
     d'une version d'export à l'autre -- chercher par nom plutôt que
     supposer une position fixe évite de recasser au prochain changement
     de format XTB."""
+    required_lower = required_col.strip().lower()
     for i, row in enumerate(rows):
-        if row and required_col in row:
+        if row and any(cell is not None and str(cell).strip().lower() == required_lower for cell in row):
             return i
     raise ValueError(f"en-tête introuvable (colonne '{required_col}' non trouvée)")
 
 
 def _column_map(header_row: tuple) -> dict[str, int]:
-    return {str(name).strip(): i for i, name in enumerate(header_row) if name is not None}
+    """Nom de colonne (normalisé en minuscules) -> index.
+
+    Insensible à la casse : les exports XTB ont déjà changé la casse de
+    certains en-têtes d'une version à l'autre (ex: "Open Time (UTC)" sur
+    l'onglet Closed Positions vs "Open time (UTC)" sur Open Positions,
+    ou l'inverse selon la version) -- normaliser évite de recasser à
+    chaque changement mineur côté XTB."""
+    return {str(name).strip().lower(): i for i, name in enumerate(header_row) if name is not None}
+
+
+def _col(row: tuple, col_map: dict[str, int], name: str):
+    """Accès à une cellule par nom de colonne, insensible à la casse.
+    Erreur explicite listant les colonnes disponibles si absente, plutôt
+    qu'un KeyError brut peu exploitable."""
+    idx = col_map.get(name.strip().lower())
+    if idx is None:
+        raise KeyError(f"colonne '{name}' introuvable. Colonnes disponibles: {sorted(col_map.keys())}")
+    return row[idx]
+
+
+def _has_col(col_map: dict[str, int], name: str) -> bool:
+    return name.strip().lower() in col_map
 
 
 def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPosition]:
@@ -175,30 +235,30 @@ def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPositio
         out: list[XtbClosedPosition] = []
 
         for row in rows[header_idx + 1:]:
-            position_id = _cell_f64(row[col["Position ID"]])
+            position_id = _cell_f64(_col(row, col, "Position ID"))
             if position_id is None:
                 continue  # ligne "Total" ou vide
 
             out.append(XtbClosedPosition(
                 position_id=str(int(position_id)),
-                symbol=_cell_str(row[col["Ticker"]]),
-                side=_cell_str(row[col["Type"]]),
-                volume=_cell_f64(row[col["Volume"]]) or 0.0,
-                open_time=_cell_datetime(row[col["Open Time (UTC)"]]),
-                open_price=_cell_f64(row[col["Open Price"]]) or 0.0,
-                close_time=_cell_datetime(row[col["Close Time (UTC)"]]),
-                close_price=_cell_f64(row[col["Close Price"]]) or 0.0,
-                open_origin=_cell_str(row[col["Open Origin"]]) if "Open Origin" in col else "",
-                close_origin=_cell_str(row[col["Close Origin"]]) if "Close Origin" in col else "",
-                purchase_value=_cell_f64(row[col["Purchase Value"]]) or 0.0,
-                sale_value=_cell_f64(row[col["Sale Value"]]) or 0.0,
-                sl=_cell_f64(row[col["Stop Loss"]]),
-                tp=_cell_f64(row[col["Take Profit"]]),
-                margin=_cell_f64(row[col["Margin"]]),
-                commission=_cell_f64(row[col["Commission"]]) or 0.0,
-                swap=_cell_f64(row[col["Swap"]]) or 0.0,
-                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
-                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
+                symbol=_cell_str(_col(row, col, "Ticker")),
+                side=_cell_str(_col(row, col, "Type")),
+                volume=_cell_f64(_col(row, col, "Volume")) or 0.0,
+                open_time=_cell_datetime(_col(row, col, "Open Time (UTC)")),
+                open_price=_cell_f64(_col(row, col, "Open Price")) or 0.0,
+                close_time=_cell_datetime(_col(row, col, "Close Time (UTC)")),
+                close_price=_cell_f64(_col(row, col, "Close Price")) or 0.0,
+                open_origin=_cell_str(_col(row, col, "Open Origin")) if _has_col(col, "Open Origin") else "",
+                close_origin=_cell_str(_col(row, col, "Close Origin")) if _has_col(col, "Close Origin") else "",
+                purchase_value=_cell_f64(_col(row, col, "Purchase Value")) or 0.0,
+                sale_value=_cell_f64(_col(row, col, "Sale Value")) or 0.0,
+                sl=_cell_f64(_col(row, col, "Stop Loss")),
+                tp=_cell_f64(_col(row, col, "Take Profit")),
+                margin=_cell_f64(_col(row, col, "Margin")),
+                commission=_cell_f64(_col(row, col, "Commission")) or 0.0,
+                swap=_cell_f64(_col(row, col, "Swap")) or 0.0,
+                rollover=_cell_f64(_col(row, col, "Rollover")) or 0.0,
+                gross_pl=_cell_f64(_col(row, col, "Gross Profit")) or 0.0,
                 source_file=source_file,
             ))
         return out
@@ -225,31 +285,48 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
         out: list[XtbOpenPosition] = []
 
         for row in rows[header_idx + 1:]:
-            side = _cell_str(row[col["Type"]])
+            side = _cell_str(_col(row, col, "Type"))
             if not side:
                 continue
-            position_id = _cell_str(row[col["Instrument/Position"]])
+            position_id = _cell_str(_col(row, col, "Instrument/Position"))
             if not position_id:
                 continue
 
+            symbol = _cell_str(_col(row, col, "Ticker"))
+            open_time = _cell_datetime(_col(row, col, "Open time (UTC)"))
+            open_price = _cell_f64(_col(row, col, "Open price")) or 0.0
+            volume = _cell_f64(_col(row, col, "Volume")) or 0.0
+
+            # Coût réel d'acquisition (Volume x Open price), converti en EUR
+            # à la date d'ouverture -- PAS la colonne "Value" (valeur de
+            # marché au moment de l'export). Cette dernière n'est de toute
+            # façon jamais relue pour la valorisation : portfolio_snapshot_at
+            # recalcule la valeur courante en direct via historical_price_eur.
+            # L'utiliser ici comme "purchase_value" faussait silencieusement
+            # tout le cost basis FIFO (compute_fifo dérive unit_cost_eur de
+            # ce champ) : à chaque réimport, le "coût d'achat" enregistré
+            # devenait la valeur de marché du jour de l'export.
+            day_str = open_time.strftime("%Y-%m-%d")
+            currency = _real_trading_currency(symbol, day_str)
+            fx_rate = _fx_rate_to_eur(currency, day_str)
+            acquisition_cost_eur = volume * open_price * fx_rate
+
             out.append(XtbOpenPosition(
                 position_id=position_id,
-                symbol=_cell_str(row[col["Ticker"]]),
+                symbol=symbol,
                 side=side,
-                volume=_cell_f64(row[col["Volume"]]) or 0.0,
-                open_time=_cell_datetime(row[col["Open time (UTC)"]]),
-                open_price=_cell_f64(row[col["Open price"]]) or 0.0,
-                market_price=_cell_f64(row[col["Current price"]]) or 0.0,
-                # Value = Volume x Current price (valeur au moment du rapport,
-                # pas coût d'acquisition) -- choix assumé, pas Volume x Open price.
-                purchase_value=_cell_f64(row[col["Value"]]) or 0.0,
-                sl=_cell_f64(row[col["Stop Loss"]]),
-                tp=_cell_f64(row[col["Take Profit"]]),
-                margin=_cell_f64(row[col["Margin"]]),
-                commission=_cell_f64(row[col["Open Commission"]]) or 0.0,
-                swap=_cell_f64(row[col["Swap"]]) or 0.0,
-                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
-                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
+                volume=volume,
+                open_time=open_time,
+                open_price=open_price,
+                market_price=_cell_f64(_col(row, col, "Current price")) or 0.0,
+                purchase_value=acquisition_cost_eur,
+                sl=_cell_f64(_col(row, col, "Stop Loss")),
+                tp=_cell_f64(_col(row, col, "Take Profit")),
+                margin=_cell_f64(_col(row, col, "Margin")),
+                commission=_cell_f64(_col(row, col, "Open Commission")) or 0.0,
+                swap=_cell_f64(_col(row, col, "Swap")) or 0.0,
+                rollover=_cell_f64(_col(row, col, "Rollover")) or 0.0,
+                gross_pl=_cell_f64(_col(row, col, "Gross Profit")) or 0.0,
                 comment=None,  # colonne "Comment" absente du nouvel export
                 source_file=source_file,
             ))
@@ -296,7 +373,7 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
         eur_asset = Asset(symbol="EUR", name="EUR", kind=AssetKind.CASH, ref_currency="EUR", identifiers=AssetIdentifiers())
 
         for row in rows[header_idx + 1:]:
-            op_type = _cell_str(row[col["Type"]])
+            op_type = _cell_str(_col(row, col, "Type"))
             if not op_type or op_type == "Total":
                 continue
             if op_type in _SKIP_CASH_TYPES:
@@ -306,8 +383,8 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
             if kind is None:
                 raise ValueError(f"Type d'opération Cash non géré: {op_type!r}")
 
-            amount = _cell_f64(row[col["Amount"]]) or 0.0
-            op_id = _cell_str(row[col["ID"]])
+            amount = _cell_f64(_col(row, col, "Amount")) or 0.0
+            op_id = _cell_str(_col(row, col, "ID"))
 
             out.append(Transaction(
                 platform=Platform.XTB,
@@ -319,9 +396,9 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
                 value_eur=abs(amount),
                 amount=amount,
                 quote_currency="EUR",
-                time=_cell_datetime(row[col["Time"]]),
+                time=_cell_datetime(_col(row, col, "Time")),
                 external_id=f"xtb-cash-{op_id}",
-                remark=_cell_str(row[col["Comment"]]) or None,
+                remark=_cell_str(_col(row, col, "Comment")) or None,
                 source_file=source_file,
             ))
         return out

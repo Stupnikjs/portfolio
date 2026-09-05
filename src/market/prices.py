@@ -57,7 +57,11 @@ def _yahoo_historical_price(ticker: str, day_str: str) -> tuple[float, str]:
         raise PriceError(f"Yahoo n'a pas trouvé de résultat pour {ticker}")
 
     meta = result[0].get("meta", {})
-    currency = meta.get("currency", "USD").upper()
+    # NB: pas de .upper() ici -- Yahoo distingue "GBp" (pence, minuscule)
+    # de "GBP" (livres) pour les actions/ETF cotés à Londres. Écraser la
+    # casse fait perdre cette distinction et traite silencieusement un
+    # prix en pence comme un prix en livres -- erreur d'un facteur 100.
+    currency = meta.get("currency", "USD")
 
     closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
     if not closes or closes[0] is None:
@@ -90,6 +94,18 @@ def _get_price_from_binance(symbol: str, time: datetime) -> float:
     raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
 
 
+def _normalize_currency_for_fx(currency: str) -> tuple[str, float]:
+    """Renvoie (devise à utiliser pour interroger la paire FX Yahoo,
+    facteur multiplicatif à appliquer au prix). Nécessaire car Yahoo
+    exprime certains titres londoniens en pence ("GBp") plutôt qu'en
+    livres ("GBP") -- il n'existe pas de paire "EURGBp=X", il faut
+    interroger "EURGBP=X" et diviser le prix en pence par 100 pour
+    obtenir des livres avant conversion."""
+    if currency in ("GBp", "GBX"):
+        return "GBP", 0.01
+    return currency, 1.0
+
+
 def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: Optional[str] = None) -> float:
     """Retourne le prix en EUR de `symbol` à la date `time` en fonction de son `kind`."""
     symbol = symbol.upper()
@@ -116,7 +132,9 @@ def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: O
         try:
             price, currency = _yahoo_historical_price(ticker, day_str)
             if currency != "EUR":
-                fx_pair = f"EUR{currency}=X"
+                fx_currency, price_factor = _normalize_currency_for_fx(currency)
+                price = price * price_factor
+                fx_pair = f"EUR{fx_currency}=X"
                 fx_price, _ = _yahoo_historical_price(fx_pair, day_str)
                 return price / fx_price
             return price

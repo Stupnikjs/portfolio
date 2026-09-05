@@ -27,9 +27,11 @@ de doublons.
 
 from pathlib import Path
 
+from src.ledger.cost_basis import compute_fifo
+
 from .parse import binance, xtb, manual
 from .store.serialize import TxStore, load_wallet, save_wallet
-from .schema import Platform, AssetKind
+from .schema import Platform, AssetKind, TransactionKind
 from .market.tickers import resolve_ticker 
 from .ledger.portfolio import portfolio_snapshot_at
 from datetime import datetime, timezone
@@ -105,6 +107,12 @@ def main():
     
     _ = tx_store.add_transactions(new_transactions)
     _ = tx_store.add_transactions(xtb_tx)
+    print("\n=== DIAGNOSTIC : BUY/DEPOSITE à quantité négative ===")
+    for tx in tx_store.transactions:
+        if tx.kind in (TransactionKind.BUY, TransactionKind.DEPOSITE) and tx.quantity <= 0:
+            print(f"  platform={tx.platform.value} asset={tx.asset.symbol} qty={tx.quantity} "
+                f"value_eur={tx.value_eur} time={tx.time} source={tx.source_file} "
+                f"external_id={tx.external_id} remark={tx.remark}")
     replaced = tx_store.replace_platform(Platform.XTB, xtb_tx)
     print(f"XTB : {replaced} transaction(s) (remplacement complet)")
 
@@ -145,19 +153,39 @@ def main():
     
     print("\n=== VALORISATION ACTUELLE ===")
     snapshot = portfolio_snapshot_at(tx_store)
+    cost_basis = compute_fifo(tx_store)
+
     print(f"Date: {snapshot['date']}")
     print(f"Valeur totale: {snapshot['total_value_eur']:,.2f} EUR")
     print("Détail par actif:")
+    print(f"  {'Symbole':<10} {'Qty':>10} {'Prix':>10} {'Valeur':>12} {'Cost basis':>12} {'P&L':>12} {'P&L %':>8}")
 
+    total_pnl = 0.0
     for asset in snapshot['assets']:
-        if asset['value_eur'] > 0.01: # On cache les poussières
-            print(f"  - {asset['symbol']:<10} ({asset['kind']:<6}) | Qty: {asset['quantity']:<10.4f} | Prix: {asset['price_eur']:<10.2f} | Valeur: {asset['value_eur']:>10,.2f} EUR")
+        if asset['value_eur'] <= 0.01 or asset in ["USDC", "SOL", "ALGO"]:  # On cache les poussières
+            continue
 
-    # Exemple à une date passée :
-    print("\n=== VALORISATION AU 01 JANVIER 2024 ===")
-    past_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    past_snapshot = portfolio_snapshot_at(tx_store, past_date)
-    print(f"Valeur totale: {past_snapshot['total_value_eur']:,.2f} EUR")
+        symbol = asset['symbol']
+        avg_cost = cost_basis.average_cost(symbol)
+        cb_total = cost_basis.open_cost_basis(symbol)
+
+        if avg_cost is not None:
+            pnl_eur = asset['value_eur'] - cb_total
+            pnl_pct = (pnl_eur / cb_total * 100) if cb_total > 0 else 0.0
+            cb_str = f"{cb_total:>11,.2f}"
+            pnl_eur_str = f"{pnl_eur:>+11,.2f}"
+            pnl_pct_str = f"{pnl_pct:>+7.2f}%"
+            total_pnl += pnl_eur
+        else:
+            # Pas de lot FIFO pour ce symbole (ex: Cash) -> pas de cost basis
+            cb_str, pnl_eur_str, pnl_pct_str = f"{'—':>11}", f"{'—':>11}", f"{'—':>8}"
+
+        print(
+            f"  {symbol:<10} {asset['quantity']:>10.4f} {asset['price_eur']:>10.2f} "
+            f"{asset['value_eur']:>12,.2f} {cb_str} {pnl_eur_str} {pnl_pct_str}"
+        )
+
+    print(f"\nP&L latent total : {total_pnl:>+,.2f} EUR")
 
 if __name__ == "__main__":
     main()
@@ -359,6 +387,156 @@ def compute_fifo(tx_store: TxStore, at: Optional[datetime] = None) -> CostBasisR
     open_lots = {symbol: list(queue) for symbol, queue in lots.items() if queue}
     return CostBasisResult(open_lots=open_lots, realized_gains=realized, fees_eur_by_symbol=fees)
 
+
+################################################################################
+# Dossier : src/ledger
+# Fichier : metrics.py
+# Chemin relatif : ledger/metrics.py
+################################################################################
+
+# src/ledger/metrics.py
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+import math
+from ..store.serialize import TxStore
+from ..ledger.positions import holdings_at
+from ..market.prices import historical_price_eur
+from ..schema import AssetKind, TransactionKind
+
+RF_ANNUAL = 0.03  # taux sans risque ECB, ajustable
+
+def _portfolio_value_series(tx_store: TxStore, start: datetime, end: datetime) -> list[tuple[datetime, float]]:
+    """Reconstruit la valeur totale du portefeuille EUR pour chaque jour
+    entre start et end. Coûteux en appels API — à cacher côté caller."""
+    series = []
+    cur = start
+    while cur <= end:
+        holdings = holdings_at(tx_store, cur)
+        v = 0.0
+        for sym, qty in holdings.items():
+            if abs(qty) < 1e-12:
+                continue
+            asset = tx_store.assets.get(sym)
+            kind = asset.kind if asset else AssetKind.CRYPTO
+            ticker = asset.identifiers.ticker if asset else None
+            try:
+                v += qty * historical_price_eur(sym, cur, kind, ticker)
+            except Exception:
+                pass
+        series.append((cur, v))
+        cur += timedelta(days=1)
+    return series
+
+def _external_cash_flows(tx_store: TxStore) -> list[tuple[datetime, float]]:
+    """Deposits = +, Withdraws = - (en EUR). Utilisé pour IRR et pour
+    découper le TWR en sous-périodes."""
+    flows = []
+    for tx in tx_store.transactions:
+        if tx.kind == TransactionKind.DEPOSITE and tx.asset.symbol in ("EUR", "EURI"):
+            flows.append((tx.time, tx.value_eur))
+        elif tx.kind == TransactionKind.WITHDRAW and tx.asset.symbol in ("EUR", "EURI"):
+            flows.append((tx.time, -tx.value_eur))
+    return sorted(flows, key=lambda x: x[0])
+
+def _twr(series: list[tuple[datetime, float]], flows: list[tuple[datetime, float]]) -> float:
+    """Time-Weighted Return : neutralise l'effet des apports/retraits."""
+    if not series:
+        return 0.0
+    # Sous-périodes = segments séparés par chaque flux
+    sub_returns = []
+    last_value = series[0][1]
+    flow_idx = 0
+    for i in range(1, len(series)):
+        # Flux entre la veille et aujourd'hui ? on clôt la sous-période
+        while flow_idx < len(flows) and flows[flow_idx][0] <= series[i][0]:
+            # corrige la valeur de fin en retirant le flux entré ce jour
+            sub = (last_value + flows[flow_idx][1]) / last_value - 1 if last_value else 0
+            sub_returns.append(sub)
+            last_value += flows[flow_idx][1]
+            flow_idx += 1
+        sub = series[i][1] / last_value - 1 if last_value else 0
+        sub_returns.append(sub)
+        last_value = series[i][1]
+    return math.prod(1 + r for r in sub_returns) - 1
+
+def _xirr(flows: list[tuple[datetime, float]], guess: float = 0.1, tol: float = 1e-6, max_iter: int = 100) -> float:
+    """Money-Weighted Return (XIRR) — Newton-Raphson."""
+    t0 = flows[0][0]
+    def npv(r):
+        return sum(cf / (1 + r) ** ((t - t0).days / 365.0) for t, cf in flows)
+    def dnpv(r):
+        return sum(-(t - t0).days / 365.0 * cf / (1 + r) ** ((t - t0).days / 365.0 + 1)
+                   for t, cf in flows)
+    r = guess
+    for _ in range(max_iter):
+        f, df = npv(r), dnpv(r)
+        if abs(df) < 1e-12:
+            break
+        r_new = r - f / df
+        if abs(r_new - r) < tol:
+            return r_new
+        r = r_new
+    return r
+
+def _daily_returns(series):
+    out = []
+    for i in range(1, len(series)):
+        if series[i-1][1] > 0:
+            out.append((series[i][1] - series[i-1][1]) / series[i-1][1])
+    return out
+
+def _max_drawdown(series):
+    peak = -math.inf
+    max_dd = 0.0
+    for _, v in series:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (peak - v) / peak
+            if dd > max_dd:
+                max_dd = dd
+    return max_dd
+
+def _var_cvar(returns: list[float], alpha: float = 0.05) -> tuple[float, float]:
+    """VaR et CVaR historiques (pertes en valeur négative)."""
+    if not returns:
+        return 0.0, 0.0
+    s = sorted(returns)
+    n = max(1, int(len(s) * alpha))
+    var = -s[n-1]
+    cvar = -sum(s[:n]) / n
+    return var, cvar
+
+def compute_portfolio_metrics(tx_store: TxStore, lookback_days: int = 365) -> dict:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=lookback_days)
+    series = _portfolio_value_series(tx_store, start, end)
+    flows = [(t, cf) for t, cf in _external_cash_flows(tx_store) if start <= t <= end]
+    flows.append((end, -series[-1][1]))  # valorisation finale = flux sortant hypothétique
+
+    twr = _twr(series, [f for f in _external_cash_flows(tx_store) if start <= f[0] <= end])
+    irr = _xirr(flows) if len(flows) > 1 else 0.0
+    rets = _daily_returns(series)
+    vol_daily = math.sqrt(sum(r*r for r in rets) / max(1, len(rets)))
+    vol_annual = vol_daily * math.sqrt(252)
+    annual_return = twr * 252 / max(1, lookback_days)  # approximation
+    sharpe = (annual_return - RF_ANNUAL) / vol_annual if vol_annual > 0 else 0.0
+    max_dd = _max_drawdown(series)
+    var95, cvar95 = _var_cvar(rets, 0.05)
+    var99, cvar99 = _var_cvar(rets, 0.01)
+
+    return {
+        "lookback_days": lookback_days,
+        "twr_pct": round(twr * 100, 2),
+        "irr_pct": round(irr * 100, 2),
+        "volatility_annual_pct": round(vol_annual * 100, 2),
+        "sharpe": round(sharpe, 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "var_95_1d_pct": round(var95 * 100, 2),
+        "cvar_95_1d_pct": round(cvar95 * 100, 2),
+        "var_99_1d_pct": round(var99 * 100, 2),
+        "cvar_99_1d_pct": round(cvar99 * 100, 2),
+    }
 
 ################################################################################
 # Dossier : src/ledger
@@ -567,7 +745,11 @@ def _yahoo_historical_price(ticker: str, day_str: str) -> tuple[float, str]:
         raise PriceError(f"Yahoo n'a pas trouvé de résultat pour {ticker}")
 
     meta = result[0].get("meta", {})
-    currency = meta.get("currency", "USD").upper()
+    # NB: pas de .upper() ici -- Yahoo distingue "GBp" (pence, minuscule)
+    # de "GBP" (livres) pour les actions/ETF cotés à Londres. Écraser la
+    # casse fait perdre cette distinction et traite silencieusement un
+    # prix en pence comme un prix en livres -- erreur d'un facteur 100.
+    currency = meta.get("currency", "USD")
 
     closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
     if not closes or closes[0] is None:
@@ -600,6 +782,18 @@ def _get_price_from_binance(symbol: str, time: datetime) -> float:
     raise PriceError(f"Binance n'a pas trouvé le prix pour {symbol} au {day_str}")
 
 
+def _normalize_currency_for_fx(currency: str) -> tuple[str, float]:
+    """Renvoie (devise à utiliser pour interroger la paire FX Yahoo,
+    facteur multiplicatif à appliquer au prix). Nécessaire car Yahoo
+    exprime certains titres londoniens en pence ("GBp") plutôt qu'en
+    livres ("GBP") -- il n'existe pas de paire "EURGBp=X", il faut
+    interroger "EURGBP=X" et diviser le prix en pence par 100 pour
+    obtenir des livres avant conversion."""
+    if currency in ("GBp", "GBX"):
+        return "GBP", 0.01
+    return currency, 1.0
+
+
 def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: Optional[str] = None) -> float:
     """Retourne le prix en EUR de `symbol` à la date `time` en fonction de son `kind`."""
     symbol = symbol.upper()
@@ -626,7 +820,9 @@ def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: O
         try:
             price, currency = _yahoo_historical_price(ticker, day_str)
             if currency != "EUR":
-                fx_pair = f"EUR{currency}=X"
+                fx_currency, price_factor = _normalize_currency_for_fx(currency)
+                price = price * price_factor
+                fx_pair = f"EUR{fx_currency}=X"
                 fx_price, _ = _yahoo_historical_price(fx_pair, day_str)
                 return price / fx_price
             return price
@@ -703,49 +899,79 @@ def ticker_for_crypto(symbol: str) -> Optional[str]:
     symbol = symbol.upper()
     return symbol if symbol in known else None
 
+
+
+# Corrections manuelles pour les cas où la recherche Yahoo se trompe
+# systématiquement (nom trop générique, ou concurrence avec des produits
+# dérivés/leveraged plus "populaires" que l'actif sous-jacent recherché).
+_MANUAL_TICKER_OVERRIDES = {
+    "MSTR.US": "MSTR",
+    # Ajoute ici le symbole XTB exact affiché par le pipeline pour l'ETF
+    # Vietnam une fois identifié, ex: "DBXVN.DE": "DBXVN.DE",
+}
+
+_ACCEPTED_QUOTE_TYPES = {"EQUITY", "ETF"}
+
+_MANUAL_TICKER_OVERRIDES = {
+    "MSTR.US": "MSTR",
+    "XFVT.DE": "XFVT.DE",  # plusieurs classes de parts homonymes (.MI/.SW/.L) -> ambigu pour la recherche Yahoo
+}
+
+def _best_quote(quotes: list[dict], expected_symbol: str) -> Optional[str]:
+    """Choisit le meilleur candidat parmi les résultats Yahoo :
+    1. correspondance EXACTE du symbole complet (gère le cas d'un même
+       fonds coté sur plusieurs places avec un radical identique, ex:
+       XFVT.DE / XFVT.MI / XFVT.SW / XFVT.L) ;
+    2. à défaut, même radical (avant le point) et type EQUITY/ETF, pour
+       éviter les produits dérivés au nom proche (ex: MSTU/MSTX pour MSTR).
+    """
+    candidates = [q for q in quotes if q.get("quoteType") in _ACCEPTED_QUOTE_TYPES]
+    if not candidates:
+        return None
+
+    exact_symbol = [q for q in candidates if q.get("symbol", "").upper() == expected_symbol.upper()]
+    if exact_symbol:
+        return exact_symbol[0].get("symbol")
+
+    expected_root = expected_symbol.split(".")[0].upper()
+    same_root = [q for q in candidates if q.get("symbol", "").split(".")[0].upper() == expected_root]
+    if len(same_root) == 1:
+        return same_root[0].get("symbol")
+
+    return None  # ambigu (plusieurs places de cotation) -> mieux vaut échouer que se tromper
+
+
 @lru_cache(maxsize=2048)
 def ticker_for_stock(symbol: str) -> Optional[str]:
     symbol = symbol.upper()
-    
-    # 1. Traduire le symbole XTB en symbole Yahoo probable
+
+    if symbol in _MANUAL_TICKER_OVERRIDES:
+        return _MANUAL_TICKER_OVERRIDES[symbol]
+
     yahoo_symbol_guess = symbol
     for xtb_suf, yahoo_suf in _XTB_TO_YAHOO_SUFFIX.items():
         if symbol.endswith(xtb_suf):
             yahoo_symbol_guess = symbol[:-len(xtb_suf)] + yahoo_suf
             break
 
-    # 2. Tentative 1 : Rechercher avec le symbole traduit
-    try:
-        resp = requests.get(
-            _YAHOO_SEARCH_API,
-            params={"q": yahoo_symbol_guess, "quotesCount": 1, "newsCount": 0},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        quotes = resp.json().get("quotes", [])
-        if quotes:
-            return quotes[0].get("symbol")
-    except (requests.RequestException, ValueError, KeyError):
-        pass
-
-    # 3. Tentative 2 : Fallback avec le symbole original (au cas où)
-    if yahoo_symbol_guess != symbol:
+    for query in (yahoo_symbol_guess, symbol) if yahoo_symbol_guess != symbol else (yahoo_symbol_guess,):
         try:
             resp = requests.get(
                 _YAHOO_SEARCH_API,
-                params={"q": symbol, "quotesCount": 1, "newsCount": 0},
+                params={"q": query, "quotesCount": 5, "newsCount": 0},
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=10,
             )
             resp.raise_for_status()
             quotes = resp.json().get("quotes", [])
-            if quotes:
-                return quotes[0].get("symbol")
+            best = _best_quote(quotes, yahoo_symbol_guess)
+            if best:
+                return best
         except (requests.RequestException, ValueError, KeyError):
             pass
-            
+
     return None
+
 
 def resolve_ticker(symbol: str, kind: AssetKind) -> Optional[str]:
     if kind == AssetKind.CRYPTO:
@@ -1050,12 +1276,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 import openpyxl
+import requests
 
-
+from ..market.prices import _yahoo_historical_price, _normalize_currency_for_fx, PriceError
+from ..market.tickers import resolve_ticker
 from ..schema import Asset, AssetIdentifiers, AssetKind, Platform, Transaction, TransactionKind
 
 
@@ -1147,6 +1376,41 @@ def _infer_currency(symbol: str) -> str:
     }.get(suffix, "EUR")
 
 
+@lru_cache(maxsize=512)
+def _fx_rate_to_eur(currency: str, day_str: str) -> float:
+    """Facteur multiplicatif -> EUR à la date donnée, via Yahoo, en tenant
+    compte du cas pence/livre ("GBp" vs "GBP", voir _normalize_currency_for_fx).
+
+    Best-effort : en cas d'échec réseau/format, renvoie 1.0 (dégradé)
+    plutôt que de lever une exception qui casserait tout l'import.
+    """
+    if currency == "EUR":
+        return 1.0
+    fx_currency, price_factor = _normalize_currency_for_fx(currency)
+    try:
+        fx_price, _ = _yahoo_historical_price(f"EUR{fx_currency}=X", day_str)
+        return price_factor / fx_price
+    except (PriceError, requests.RequestException):
+        return 1.0
+
+
+@lru_cache(maxsize=2048)
+def _real_trading_currency(symbol: str, day_str: str) -> str:
+    """Devise de cotation RÉELLE de `symbol`, lue chez Yahoo -- ne jamais
+    la deviner depuis le suffixe XTB (ex: '.UK' ne garantit pas GBP :
+    certains ETC/ADR cotés à Londres sont en USD ; et parmi ceux qui sont
+    bien en GBP, beaucoup sont en réalité cotés en pence "GBp"). Repli sur
+    l'heuristique de suffixe si la résolution Yahoo échoue."""
+    ticker = resolve_ticker(symbol, AssetKind.STOCK)
+    if ticker:
+        try:
+            _, currency = _yahoo_historical_price(ticker, day_str)
+            return currency
+        except (PriceError, requests.RequestException):
+            pass
+    return _infer_currency(symbol)
+
+
 def find_sheet_by_prefix(path: Path, prefix: str) -> str:
     """Trouve dynamiquement le nom d'onglet commençant par un préfixe donné,
     utile pour 'OPEN POSITION <date>' dont le nom exact change à chaque export.
@@ -1192,14 +1456,36 @@ def _find_header_row(rows: list[tuple], required_col: str) -> int:
     d'une version d'export à l'autre -- chercher par nom plutôt que
     supposer une position fixe évite de recasser au prochain changement
     de format XTB."""
+    required_lower = required_col.strip().lower()
     for i, row in enumerate(rows):
-        if row and required_col in row:
+        if row and any(cell is not None and str(cell).strip().lower() == required_lower for cell in row):
             return i
     raise ValueError(f"en-tête introuvable (colonne '{required_col}' non trouvée)")
 
 
 def _column_map(header_row: tuple) -> dict[str, int]:
-    return {str(name).strip(): i for i, name in enumerate(header_row) if name is not None}
+    """Nom de colonne (normalisé en minuscules) -> index.
+
+    Insensible à la casse : les exports XTB ont déjà changé la casse de
+    certains en-têtes d'une version à l'autre (ex: "Open Time (UTC)" sur
+    l'onglet Closed Positions vs "Open time (UTC)" sur Open Positions,
+    ou l'inverse selon la version) -- normaliser évite de recasser à
+    chaque changement mineur côté XTB."""
+    return {str(name).strip().lower(): i for i, name in enumerate(header_row) if name is not None}
+
+
+def _col(row: tuple, col_map: dict[str, int], name: str):
+    """Accès à une cellule par nom de colonne, insensible à la casse.
+    Erreur explicite listant les colonnes disponibles si absente, plutôt
+    qu'un KeyError brut peu exploitable."""
+    idx = col_map.get(name.strip().lower())
+    if idx is None:
+        raise KeyError(f"colonne '{name}' introuvable. Colonnes disponibles: {sorted(col_map.keys())}")
+    return row[idx]
+
+
+def _has_col(col_map: dict[str, int], name: str) -> bool:
+    return name.strip().lower() in col_map
 
 
 def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPosition]:
@@ -1221,30 +1507,30 @@ def parse_closed_positions(path: Path, sheet_name: str) -> list[XtbClosedPositio
         out: list[XtbClosedPosition] = []
 
         for row in rows[header_idx + 1:]:
-            position_id = _cell_f64(row[col["Position ID"]])
+            position_id = _cell_f64(_col(row, col, "Position ID"))
             if position_id is None:
                 continue  # ligne "Total" ou vide
 
             out.append(XtbClosedPosition(
                 position_id=str(int(position_id)),
-                symbol=_cell_str(row[col["Ticker"]]),
-                side=_cell_str(row[col["Type"]]),
-                volume=_cell_f64(row[col["Volume"]]) or 0.0,
-                open_time=_cell_datetime(row[col["Open Time (UTC)"]]),
-                open_price=_cell_f64(row[col["Open Price"]]) or 0.0,
-                close_time=_cell_datetime(row[col["Close Time (UTC)"]]),
-                close_price=_cell_f64(row[col["Close Price"]]) or 0.0,
-                open_origin=_cell_str(row[col["Open Origin"]]) if "Open Origin" in col else "",
-                close_origin=_cell_str(row[col["Close Origin"]]) if "Close Origin" in col else "",
-                purchase_value=_cell_f64(row[col["Purchase Value"]]) or 0.0,
-                sale_value=_cell_f64(row[col["Sale Value"]]) or 0.0,
-                sl=_cell_f64(row[col["Stop Loss"]]),
-                tp=_cell_f64(row[col["Take Profit"]]),
-                margin=_cell_f64(row[col["Margin"]]),
-                commission=_cell_f64(row[col["Commission"]]) or 0.0,
-                swap=_cell_f64(row[col["Swap"]]) or 0.0,
-                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
-                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
+                symbol=_cell_str(_col(row, col, "Ticker")),
+                side=_cell_str(_col(row, col, "Type")),
+                volume=_cell_f64(_col(row, col, "Volume")) or 0.0,
+                open_time=_cell_datetime(_col(row, col, "Open Time (UTC)")),
+                open_price=_cell_f64(_col(row, col, "Open Price")) or 0.0,
+                close_time=_cell_datetime(_col(row, col, "Close Time (UTC)")),
+                close_price=_cell_f64(_col(row, col, "Close Price")) or 0.0,
+                open_origin=_cell_str(_col(row, col, "Open Origin")) if _has_col(col, "Open Origin") else "",
+                close_origin=_cell_str(_col(row, col, "Close Origin")) if _has_col(col, "Close Origin") else "",
+                purchase_value=_cell_f64(_col(row, col, "Purchase Value")) or 0.0,
+                sale_value=_cell_f64(_col(row, col, "Sale Value")) or 0.0,
+                sl=_cell_f64(_col(row, col, "Stop Loss")),
+                tp=_cell_f64(_col(row, col, "Take Profit")),
+                margin=_cell_f64(_col(row, col, "Margin")),
+                commission=_cell_f64(_col(row, col, "Commission")) or 0.0,
+                swap=_cell_f64(_col(row, col, "Swap")) or 0.0,
+                rollover=_cell_f64(_col(row, col, "Rollover")) or 0.0,
+                gross_pl=_cell_f64(_col(row, col, "Gross Profit")) or 0.0,
                 source_file=source_file,
             ))
         return out
@@ -1271,31 +1557,48 @@ def parse_open_positions(path: Path, sheet_name: str) -> list[XtbOpenPosition]:
         out: list[XtbOpenPosition] = []
 
         for row in rows[header_idx + 1:]:
-            side = _cell_str(row[col["Type"]])
+            side = _cell_str(_col(row, col, "Type"))
             if not side:
                 continue
-            position_id = _cell_str(row[col["Instrument/Position"]])
+            position_id = _cell_str(_col(row, col, "Instrument/Position"))
             if not position_id:
                 continue
 
+            symbol = _cell_str(_col(row, col, "Ticker"))
+            open_time = _cell_datetime(_col(row, col, "Open time (UTC)"))
+            open_price = _cell_f64(_col(row, col, "Open price")) or 0.0
+            volume = _cell_f64(_col(row, col, "Volume")) or 0.0
+
+            # Coût réel d'acquisition (Volume x Open price), converti en EUR
+            # à la date d'ouverture -- PAS la colonne "Value" (valeur de
+            # marché au moment de l'export). Cette dernière n'est de toute
+            # façon jamais relue pour la valorisation : portfolio_snapshot_at
+            # recalcule la valeur courante en direct via historical_price_eur.
+            # L'utiliser ici comme "purchase_value" faussait silencieusement
+            # tout le cost basis FIFO (compute_fifo dérive unit_cost_eur de
+            # ce champ) : à chaque réimport, le "coût d'achat" enregistré
+            # devenait la valeur de marché du jour de l'export.
+            day_str = open_time.strftime("%Y-%m-%d")
+            currency = _real_trading_currency(symbol, day_str)
+            fx_rate = _fx_rate_to_eur(currency, day_str)
+            acquisition_cost_eur = volume * open_price * fx_rate
+
             out.append(XtbOpenPosition(
                 position_id=position_id,
-                symbol=_cell_str(row[col["Ticker"]]),
+                symbol=symbol,
                 side=side,
-                volume=_cell_f64(row[col["Volume"]]) or 0.0,
-                open_time=_cell_datetime(row[col["Open time (UTC)"]]),
-                open_price=_cell_f64(row[col["Open price"]]) or 0.0,
-                market_price=_cell_f64(row[col["Current price"]]) or 0.0,
-                # Value = Volume x Current price (valeur au moment du rapport,
-                # pas coût d'acquisition) -- choix assumé, pas Volume x Open price.
-                purchase_value=_cell_f64(row[col["Value"]]) or 0.0,
-                sl=_cell_f64(row[col["Stop Loss"]]),
-                tp=_cell_f64(row[col["Take Profit"]]),
-                margin=_cell_f64(row[col["Margin"]]),
-                commission=_cell_f64(row[col["Open Commission"]]) or 0.0,
-                swap=_cell_f64(row[col["Swap"]]) or 0.0,
-                rollover=_cell_f64(row[col["Rollover"]]) or 0.0,
-                gross_pl=_cell_f64(row[col["Gross Profit"]]) or 0.0,
+                volume=volume,
+                open_time=open_time,
+                open_price=open_price,
+                market_price=_cell_f64(_col(row, col, "Current price")) or 0.0,
+                purchase_value=acquisition_cost_eur,
+                sl=_cell_f64(_col(row, col, "Stop Loss")),
+                tp=_cell_f64(_col(row, col, "Take Profit")),
+                margin=_cell_f64(_col(row, col, "Margin")),
+                commission=_cell_f64(_col(row, col, "Open Commission")) or 0.0,
+                swap=_cell_f64(_col(row, col, "Swap")) or 0.0,
+                rollover=_cell_f64(_col(row, col, "Rollover")) or 0.0,
+                gross_pl=_cell_f64(_col(row, col, "Gross Profit")) or 0.0,
                 comment=None,  # colonne "Comment" absente du nouvel export
                 source_file=source_file,
             ))
@@ -1342,7 +1645,7 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
         eur_asset = Asset(symbol="EUR", name="EUR", kind=AssetKind.CASH, ref_currency="EUR", identifiers=AssetIdentifiers())
 
         for row in rows[header_idx + 1:]:
-            op_type = _cell_str(row[col["Type"]])
+            op_type = _cell_str(_col(row, col, "Type"))
             if not op_type or op_type == "Total":
                 continue
             if op_type in _SKIP_CASH_TYPES:
@@ -1352,8 +1655,8 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
             if kind is None:
                 raise ValueError(f"Type d'opération Cash non géré: {op_type!r}")
 
-            amount = _cell_f64(row[col["Amount"]]) or 0.0
-            op_id = _cell_str(row[col["ID"]])
+            amount = _cell_f64(_col(row, col, "Amount")) or 0.0
+            op_id = _cell_str(_col(row, col, "ID"))
 
             out.append(Transaction(
                 platform=Platform.XTB,
@@ -1365,9 +1668,9 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
                 value_eur=abs(amount),
                 amount=amount,
                 quote_currency="EUR",
-                time=_cell_datetime(row[col["Time"]]),
+                time=_cell_datetime(_col(row, col, "Time")),
                 external_id=f"xtb-cash-{op_id}",
-                remark=_cell_str(row[col["Comment"]]) or None,
+                remark=_cell_str(_col(row, col, "Comment")) or None,
                 source_file=source_file,
             ))
         return out

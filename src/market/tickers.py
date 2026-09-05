@@ -50,49 +50,79 @@ def ticker_for_crypto(symbol: str) -> Optional[str]:
     symbol = symbol.upper()
     return symbol if symbol in known else None
 
+
+
+# Corrections manuelles pour les cas où la recherche Yahoo se trompe
+# systématiquement (nom trop générique, ou concurrence avec des produits
+# dérivés/leveraged plus "populaires" que l'actif sous-jacent recherché).
+_MANUAL_TICKER_OVERRIDES = {
+    "MSTR.US": "MSTR",
+    # Ajoute ici le symbole XTB exact affiché par le pipeline pour l'ETF
+    # Vietnam une fois identifié, ex: "DBXVN.DE": "DBXVN.DE",
+}
+
+_ACCEPTED_QUOTE_TYPES = {"EQUITY", "ETF"}
+
+_MANUAL_TICKER_OVERRIDES = {
+    "MSTR.US": "MSTR",
+    "XFVT.DE": "XFVT.DE",  # plusieurs classes de parts homonymes (.MI/.SW/.L) -> ambigu pour la recherche Yahoo
+}
+
+def _best_quote(quotes: list[dict], expected_symbol: str) -> Optional[str]:
+    """Choisit le meilleur candidat parmi les résultats Yahoo :
+    1. correspondance EXACTE du symbole complet (gère le cas d'un même
+       fonds coté sur plusieurs places avec un radical identique, ex:
+       XFVT.DE / XFVT.MI / XFVT.SW / XFVT.L) ;
+    2. à défaut, même radical (avant le point) et type EQUITY/ETF, pour
+       éviter les produits dérivés au nom proche (ex: MSTU/MSTX pour MSTR).
+    """
+    candidates = [q for q in quotes if q.get("quoteType") in _ACCEPTED_QUOTE_TYPES]
+    if not candidates:
+        return None
+
+    exact_symbol = [q for q in candidates if q.get("symbol", "").upper() == expected_symbol.upper()]
+    if exact_symbol:
+        return exact_symbol[0].get("symbol")
+
+    expected_root = expected_symbol.split(".")[0].upper()
+    same_root = [q for q in candidates if q.get("symbol", "").split(".")[0].upper() == expected_root]
+    if len(same_root) == 1:
+        return same_root[0].get("symbol")
+
+    return None  # ambigu (plusieurs places de cotation) -> mieux vaut échouer que se tromper
+
+
 @lru_cache(maxsize=2048)
 def ticker_for_stock(symbol: str) -> Optional[str]:
     symbol = symbol.upper()
-    
-    # 1. Traduire le symbole XTB en symbole Yahoo probable
+
+    if symbol in _MANUAL_TICKER_OVERRIDES:
+        return _MANUAL_TICKER_OVERRIDES[symbol]
+
     yahoo_symbol_guess = symbol
     for xtb_suf, yahoo_suf in _XTB_TO_YAHOO_SUFFIX.items():
         if symbol.endswith(xtb_suf):
             yahoo_symbol_guess = symbol[:-len(xtb_suf)] + yahoo_suf
             break
 
-    # 2. Tentative 1 : Rechercher avec le symbole traduit
-    try:
-        resp = requests.get(
-            _YAHOO_SEARCH_API,
-            params={"q": yahoo_symbol_guess, "quotesCount": 1, "newsCount": 0},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        quotes = resp.json().get("quotes", [])
-        if quotes:
-            return quotes[0].get("symbol")
-    except (requests.RequestException, ValueError, KeyError):
-        pass
-
-    # 3. Tentative 2 : Fallback avec le symbole original (au cas où)
-    if yahoo_symbol_guess != symbol:
+    for query in (yahoo_symbol_guess, symbol) if yahoo_symbol_guess != symbol else (yahoo_symbol_guess,):
         try:
             resp = requests.get(
                 _YAHOO_SEARCH_API,
-                params={"q": symbol, "quotesCount": 1, "newsCount": 0},
+                params={"q": query, "quotesCount": 5, "newsCount": 0},
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=10,
             )
             resp.raise_for_status()
             quotes = resp.json().get("quotes", [])
-            if quotes:
-                return quotes[0].get("symbol")
+            best = _best_quote(quotes, yahoo_symbol_guess)
+            if best:
+                return best
         except (requests.RequestException, ValueError, KeyError):
             pass
-            
+
     return None
+
 
 def resolve_ticker(symbol: str, kind: AssetKind) -> Optional[str]:
     if kind == AssetKind.CRYPTO:

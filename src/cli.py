@@ -147,7 +147,7 @@ def main():
 
     total_pnl = 0.0
     for asset in snapshot['assets']:
-        if asset['value_eur'] <= 0.01:  # On cache les poussières
+        if asset['value_eur'] <= 0.01 or asset in ["USDC", "SOL", "ALGO"]:  # On cache les poussières
             continue
 
         symbol = asset['symbol']
