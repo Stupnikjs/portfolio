@@ -12,9 +12,11 @@ de doublons.
 
 from pathlib import Path
 
+from src.ledger.cost_basis import compute_fifo
+
 from .parse import binance, xtb, manual
 from .store.serialize import TxStore, load_wallet, save_wallet
-from .schema import Platform, AssetKind
+from .schema import Platform, AssetKind, TransactionKind
 from .market.tickers import resolve_ticker 
 from .ledger.portfolio import portfolio_snapshot_at
 from datetime import datetime, timezone
@@ -90,6 +92,12 @@ def main():
     
     _ = tx_store.add_transactions(new_transactions)
     _ = tx_store.add_transactions(xtb_tx)
+    print("\n=== DIAGNOSTIC : BUY/DEPOSITE à quantité négative ===")
+    for tx in tx_store.transactions:
+        if tx.kind in (TransactionKind.BUY, TransactionKind.DEPOSITE) and tx.quantity <= 0:
+            print(f"  platform={tx.platform.value} asset={tx.asset.symbol} qty={tx.quantity} "
+                f"value_eur={tx.value_eur} time={tx.time} source={tx.source_file} "
+                f"external_id={tx.external_id} remark={tx.remark}")
     replaced = tx_store.replace_platform(Platform.XTB, xtb_tx)
     print(f"XTB : {replaced} transaction(s) (remplacement complet)")
 
@@ -130,19 +138,39 @@ def main():
     
     print("\n=== VALORISATION ACTUELLE ===")
     snapshot = portfolio_snapshot_at(tx_store)
+    cost_basis = compute_fifo(tx_store)
+
     print(f"Date: {snapshot['date']}")
     print(f"Valeur totale: {snapshot['total_value_eur']:,.2f} EUR")
     print("Détail par actif:")
+    print(f"  {'Symbole':<10} {'Qty':>10} {'Prix':>10} {'Valeur':>12} {'Cost basis':>12} {'P&L':>12} {'P&L %':>8}")
 
+    total_pnl = 0.0
     for asset in snapshot['assets']:
-        if asset['value_eur'] > 0.01: # On cache les poussières
-            print(f"  - {asset['symbol']:<10} ({asset['kind']:<6}) | Qty: {asset['quantity']:<10.4f} | Prix: {asset['price_eur']:<10.2f} | Valeur: {asset['value_eur']:>10,.2f} EUR")
+        if asset['value_eur'] <= 0.01:  # On cache les poussières
+            continue
 
-    # Exemple à une date passée :
-    print("\n=== VALORISATION AU 01 JANVIER 2024 ===")
-    past_date = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    past_snapshot = portfolio_snapshot_at(tx_store, past_date)
-    print(f"Valeur totale: {past_snapshot['total_value_eur']:,.2f} EUR")
+        symbol = asset['symbol']
+        avg_cost = cost_basis.average_cost(symbol)
+        cb_total = cost_basis.open_cost_basis(symbol)
+
+        if avg_cost is not None:
+            pnl_eur = asset['value_eur'] - cb_total
+            pnl_pct = (pnl_eur / cb_total * 100) if cb_total > 0 else 0.0
+            cb_str = f"{cb_total:>11,.2f}"
+            pnl_eur_str = f"{pnl_eur:>+11,.2f}"
+            pnl_pct_str = f"{pnl_pct:>+7.2f}%"
+            total_pnl += pnl_eur
+        else:
+            # Pas de lot FIFO pour ce symbole (ex: Cash) -> pas de cost basis
+            cb_str, pnl_eur_str, pnl_pct_str = f"{'—':>11}", f"{'—':>11}", f"{'—':>8}"
+
+        print(
+            f"  {symbol:<10} {asset['quantity']:>10.4f} {asset['price_eur']:>10.2f} "
+            f"{asset['value_eur']:>12,.2f} {cb_str} {pnl_eur_str} {pnl_pct_str}"
+        )
+
+    print(f"\nP&L latent total : {total_pnl:>+,.2f} EUR")
 
 if __name__ == "__main__":
     main()
