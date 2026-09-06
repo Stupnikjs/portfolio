@@ -34,41 +34,74 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
     resp.raise_for_status()
     return resp.json()
 
-
 @lru_cache(maxsize=4096)
 def _yahoo_historical_price(ticker: str, day_str: str) -> tuple[float, str]:
-    """Récupère le prix de clôture et la devise via Yahoo Finance."""
-    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    start_s = int(dt.timestamp())
-    end_s = int((dt + timedelta(days=1)).timestamp())
+    """Récupère la dernière clôture Yahoo disponible <= day_str.
+
+    Important : day_str peut tomber un week-end ou un jour férié.
+    On demande une fenêtre de plusieurs jours et on prend la dernière
+    bougie disponible avant ou à la date cible.
+    """
+    target = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    # 7 jours en arrière couvrent normalement week-ends + jours fériés.
+    period1 = int((target - timedelta(days=7)).timestamp())
+    period2 = int((target + timedelta(days=1)).timestamp())
 
     url = _YAHOO_CHART_API.format(ticker=ticker)
+
     resp = requests.get(
         url,
-        params={"period1": start_s, "period2": end_s, "interval": "1d"},
+        params={
+            "period1": period1,
+            "period2": period2,
+            "interval": "1d",
+            "events": "history",
+        },
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=10,
     )
     resp.raise_for_status()
+
     data = resp.json()
 
     result = data.get("chart", {}).get("result", [])
     if not result:
         raise PriceError(f"Yahoo n'a pas trouvé de résultat pour {ticker}")
 
-    meta = result[0].get("meta", {})
-    # NB: pas de .upper() ici -- Yahoo distingue "GBp" (pence, minuscule)
-    # de "GBP" (livres) pour les actions/ETF cotés à Londres. Écraser la
-    # casse fait perdre cette distinction et traite silencieusement un
-    # prix en pence comme un prix en livres -- erreur d'un facteur 100.
+    result = result[0]
+    meta = result.get("meta", {})
+
+    # Ne surtout pas faire .upper() : GBp != GBP.
     currency = meta.get("currency", "USD")
 
-    closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-    if not closes or closes[0] is None:
-        raise PriceError(f"Pas de prix de clôture pour {ticker} au {day_str}")
+    timestamps = result.get("timestamp", [])
+    closes = (
+        result.get("indicators", {})
+        .get("quote", [{}])[0]
+        .get("close", [])
+    )
 
-    return float(closes[0]), currency
+    candidates = []
 
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        if dt <= target:
+            candidates.append((dt, float(close)))
+
+    if not candidates:
+        raise PriceError(
+            f"Pas de clôture Yahoo disponible pour {ticker} "
+            f"au plus tard le {day_str}"
+        )
+
+    used_date, price = max(candidates, key=lambda x: x[0])
+
+    return price, currency
 
 def _get_price_from_binance(symbol: str, time: datetime) -> float:
     day_str = time.strftime("%Y-%m-%d")

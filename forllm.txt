@@ -192,6 +192,697 @@ if __name__ == "__main__":
 
 
 ################################################################################
+# Dossier : src/fundamentals
+# Fichier : __init__.py
+# Chemin relatif : fundamentals/__init__.py
+################################################################################
+
+
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : cli.py
+# Chemin relatif : fundamentals/cli.py
+################################################################################
+
+"""Point d'entrée du pipeline fondamentaux (actions uniquement).
+
+Usage :
+  python -m src.fundamentals.cli refresh MSTR
+  python -m src.fundamentals.cli refresh --all
+  python -m src.fundamentals.cli init MSTR "thèse initiale" --criteria "FCF yield < 3%" "..."
+  python -m src.fundamentals.cli prompt MSTR
+  python -m src.fundamentals.cli ingest MSTR reponse.json
+
+`refresh` n'appelle aucun LLM (juste Yahoo, gratuit) -- peut tourner aussi
+souvent que voulu, y compris à chaque build_wallet.py. `prompt`/`ingest`
+sont le flux manuel : tu copies le texte affiché par `prompt` dans un
+chat, tu sauvegardes sa réponse JSON dans un fichier, puis `ingest`.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ..schema import AssetKind
+from ..store.serialize import load_wallet
+from .hard_data import fetch_hard_data
+from .ingest import ingest_response
+from .prompt_builder import build_update_prompt
+from .schema import FundamentalSnapshot, InvalidationCriterion, Thesis
+from .store import load_fundamentals, save_fundamentals
+
+TX_STORE_PATH = Path("./data/tx_store.json")
+
+
+def _refresh_one(symbol: str, ticker: str) -> None:
+    hd = fetch_hard_data(ticker)
+    if hd is None:
+        print(f"  [WARN] Yahoo n'a rien renvoyé pour {ticker}, refresh ignoré")
+        return
+
+    current = load_fundamentals(symbol)
+    snapshot = current or FundamentalSnapshot(symbol=symbol, ticker=ticker, as_of="")
+    snapshot.hard_data = hd
+    snapshot.as_of = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    save_fundamentals(symbol, snapshot)
+    print(f"  \u2713 {symbol:<10} hard_data actualis\u00e9")
+
+
+def cmd_refresh(args: argparse.Namespace) -> None:
+    tx_store = load_wallet(TX_STORE_PATH)
+    if args.all:
+        for symbol, asset in tx_store.assets.items():
+            if asset.kind != AssetKind.STOCK or not asset.identifiers.ticker:
+                continue
+            _refresh_one(symbol, asset.identifiers.ticker)
+    else:
+        asset = tx_store.assets.get(args.symbol)
+        ticker = asset.identifiers.ticker if asset and asset.identifiers.ticker else args.symbol
+        _refresh_one(args.symbol, ticker)
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    current = load_fundamentals(args.symbol)
+    if current is None:
+        print(f"  [ERREUR] lance d'abord 'refresh {args.symbol}' pour cr\u00e9er le hard_data")
+        return
+    current.thesis = Thesis(
+        initial_thesis=args.thesis,
+        initial_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        invalidation_criteria=[InvalidationCriterion(condition=c) for c in (args.criteria or [])],
+        status="valid",
+    )
+    save_fundamentals(args.symbol, current)
+    print(f"  \u2713 Th\u00e8se initiale enregistr\u00e9e pour {args.symbol}")
+
+
+def cmd_prompt(args: argparse.Namespace) -> None:
+    current = load_fundamentals(args.symbol)
+    if current is None:
+        print(f"  [ERREUR] aucun fichier pour {args.symbol}, lance d'abord 'refresh'")
+        return
+    print(build_update_prompt(current))
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    ingest_response(args.symbol, Path(args.response_file))
+    print(f"  \u2713 {args.symbol} mis \u00e0 jour \u00e0 partir de {args.response_file}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Pipeline fondamentaux (actions)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_refresh = sub.add_parser("refresh", help="Actualise hard_data depuis Yahoo (pas de LLM)")
+    p_refresh.add_argument("symbol", nargs="?", help="Symbole (ignor\u00e9 si --all)")
+    p_refresh.add_argument("--all", action="store_true", help="Toutes les actions du wallet")
+    p_refresh.set_defaults(func=cmd_refresh)
+
+    p_init = sub.add_parser("init", help="Enregistre la th\u00e8se initiale")
+    p_init.add_argument("symbol")
+    p_init.add_argument("thesis")
+    p_init.add_argument("--criteria", nargs="*", help="Crit\u00e8res d'invalidation, un par argument")
+    p_init.set_defaults(func=cmd_init)
+
+    p_prompt = sub.add_parser("prompt", help="Affiche le prompt \u00e0 copier-coller")
+    p_prompt.add_argument("symbol")
+    p_prompt.set_defaults(func=cmd_prompt)
+
+    p_ingest = sub.add_parser("ingest", help="Ing\u00e8re la r\u00e9ponse LLM coll\u00e9e dans un fichier")
+    p_ingest.add_argument("symbol")
+    p_ingest.add_argument("response_file")
+    p_ingest.set_defaults(func=cmd_ingest)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : hard_data.py
+# Chemin relatif : fundamentals/hard_data.py
+################################################################################
+
+"""Récupération des données fondamentales factuelles ("hard data") d'une
+action via l'API quoteSummary de Yahoo Finance -- aucun LLM, aucun coût,
+aucune hallucination possible sur les chiffres.
+
+Best-effort, comme market/prices.py et market/tickers.py du projet
+principal : un échec réseau ne doit jamais casser le refresh des autres
+actifs du portefeuille, donc on renvoie None plutôt que de lever.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Optional
+
+import requests
+
+from .schema import Analyst, BalanceSheet, Growth, HardData, Profitability, Valuation
+
+_YAHOO_MODULES = "quoteType,assetProfile,financialData,defaultKeyStatistics,summaryDetail"
+_YAHOO_QUOTE_SUMMARY = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+_YAHOO_CRUMB_URL = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+
+# Types Yahoo traités comme des actions -- tout le reste (ETF, MUTUALFUND,
+# CRYPTOCURRENCY, INDEX...) est explicitement exclu du pipeline fundamentals
+# actions : Yahoo ne fournit pas de financialData exploitable pour un ETF
+# (PE, marges, etc. n'ont pas de sens pour un panier de titres).
+_EQUITY_QUOTE_TYPES = {"EQUITY"}
+
+# Session module-level réutilisée entre tickers : quoteSummary exige
+# désormais un cookie de session + un "crumb" (contrairement à
+# chart/search, utilisés dans market/prices.py et market/tickers.py, qui
+# n'en ont pas besoin). On récupère le crumb une seule fois et on le
+# réutilise pour tous les appels du run.
+_session: Optional[requests.Session] = None
+_crumb: Optional[str] = None
+
+
+def _get_session_and_crumb() -> tuple[requests.Session, Optional[str]]:
+    global _session, _crumb
+    if _session is None:
+        _session = requests.Session()
+        _session.headers.update({"User-Agent": "Mozilla/5.0"})
+        try:
+            # Un premier hit sur le domaine pose les cookies nécessaires
+            # avant de demander le crumb.
+            _session.get("https://fc.yahoo.com", timeout=10)
+            resp = _session.get(_YAHOO_CRUMB_URL, timeout=10)
+            resp.raise_for_status()
+            _crumb = resp.text.strip()
+        except requests.RequestException as e:
+            print(f"  [WARN] Impossible d'obtenir le crumb Yahoo : {e}")
+            _crumb = None
+    return _session, _crumb
+
+
+def _get(d: dict, key: str, default=None):
+    """Lit une valeur dans un dict Yahoo, en dépliant le format
+    {"raw": ..., "fmt": ...} utilisé pour la plupart des champs numériques.
+    Un champ manquant ou vide côté Yahoo peut arriver sous forme de dict
+    sans clé "raw" (ex: {}) -- il faut le traiter comme absent (None),
+    jamais le retourner tel quel."""
+    val = d.get(key, default)
+    if isinstance(val, dict):
+        return val.get("raw", default)
+    return val if val is not None else default
+
+
+def _pct(ratio: Optional[float]) -> Optional[float]:
+    return round(ratio * 100, 2) if ratio is not None else None
+
+
+def fetch_hard_data(ticker: str) -> Optional[HardData]:
+    session, crumb = _get_session_and_crumb()
+    url = _YAHOO_QUOTE_SUMMARY.format(ticker=ticker)
+    params = {"modules": _YAHOO_MODULES}
+    if crumb:
+        params["crumb"] = crumb
+
+    try:
+        resp = session.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        result = resp.json().get("quoteSummary", {}).get("result")
+        if not result:
+            print(f"  [WARN] Yahoo : pas de résultat pour {ticker} (status {resp.status_code})")
+            return None
+        data = result[0]
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"  [WARN] Yahoo quoteSummary KO pour {ticker} : {e}")
+        return None
+
+    quote_type = _get(data.get("quoteType", {}), "quoteType")
+    if quote_type not in _EQUITY_QUOTE_TYPES:
+        print(f"  [SKIP] {ticker} n'est pas une action (quoteType={quote_type!r}), exclu du pipeline fundamentals")
+        return None
+
+    profile = data.get("assetProfile", {})
+    fin = data.get("financialData", {})
+    stats = data.get("defaultKeyStatistics", {})
+    detail = data.get("summaryDetail", {})
+
+    market_cap_eur = _get(detail, "marketCap")
+    fcf_raw = _get(fin, "freeCashflow")
+    fcf_eur_m = round(fcf_raw / 1_000_000, 2) if fcf_raw is not None else None
+    fcf_yield_pct = (
+        round(fcf_raw / market_cap_eur * 100, 2)
+        if fcf_raw is not None and market_cap_eur
+        else None
+    )
+
+    return HardData(
+        sector=profile.get("sector"),
+        industry=profile.get("industry"),
+        market_cap_eur=market_cap_eur,
+        valuation=Valuation(
+            pe_trailing=_get(detail, "trailingPE"),
+            pe_forward=_get(stats, "forwardPE"),
+            peg_ratio=_get(stats, "pegRatio"),
+            ev_ebitda=_get(stats, "enterpriseToEbitda"),
+            price_to_sales=_get(stats, "priceToSalesTrailing12Months"),
+            price_to_book=_get(stats, "priceToBook"),
+        ),
+        profitability=Profitability(
+            fcf_eur_m=fcf_eur_m,
+            fcf_yield_pct=fcf_yield_pct,
+            gross_margin_pct=_pct(_get(fin, "grossMargins")),
+            operating_margin_pct=_pct(_get(fin, "operatingMargins")),
+            roe_pct=_pct(_get(fin, "returnOnEquity")),
+        ),
+        growth=Growth(
+            revenue_growth_yoy_pct=_pct(_get(fin, "revenueGrowth")),
+            eps_growth_yoy_pct=_pct(_get(fin, "earningsGrowth")),
+        ),
+        balance_sheet=BalanceSheet(
+            net_debt_eur_m=None,  # non fourni par ce module Yahoo
+            debt_to_equity=_get(fin, "debtToEquity"),
+        ),
+        analyst=Analyst(
+            target_price_eur=_get(fin, "targetMeanPrice"),
+            rating_consensus=_get(fin, "recommendationKey"),
+            n_analysts=_get(fin, "numberOfAnalystOpinions"),
+        ),
+        source="yahoo_quotesummary",
+        fetched_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : ingest.py
+# Chemin relatif : fundamentals/ingest.py
+################################################################################
+
+"""Ingestion de la réponse LLM collée en retour du prompt généré par
+prompt_builder.py -- ne touche jamais à hard_data (déjà à jour, factuel,
+géré par hard_data.py) ni à initial_thesis/initial_date (posés une fois
+via cli.py `init`), uniquement au statut de la thèse et au narratif.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .schema import FundamentalSnapshot, InvalidationCriterion, Meta, Narrative, Thesis
+from .store import load_fundamentals, save_fundamentals
+
+
+class IngestError(ValueError):
+    pass
+
+
+def _strip_code_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+    return text.strip()
+
+
+def ingest_response(symbol: str, response_path: Path) -> FundamentalSnapshot:
+    current = load_fundamentals(symbol)
+    if current is None:
+        raise IngestError(
+            f"aucun fichier courant pour {symbol} -- lance d'abord 'refresh {symbol}'"
+        )
+
+    raw = response_path.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(_strip_code_fences(raw))
+    except json.JSONDecodeError as e:
+        raise IngestError(f"réponse LLM non parsable en JSON : {e}") from e
+
+    try:
+        thesis_data = parsed["thesis"]
+        narrative_data = parsed["narrative"]
+    except KeyError as e:
+        raise IngestError(f"champ manquant dans la réponse LLM : {e}") from e
+    meta_data = parsed.get("meta", {})
+
+    current.thesis = Thesis(
+        initial_thesis=current.thesis.initial_thesis,  # jamais réécrit par le LLM
+        initial_date=current.thesis.initial_date,        # idem
+        invalidation_criteria=[
+            InvalidationCriterion(**c) for c in thesis_data.get("invalidation_criteria", [])
+        ],
+        status=thesis_data.get("status", current.thesis.status),
+        last_reviewed=thesis_data.get("last_reviewed"),
+        review_notes=thesis_data.get("review_notes"),
+    )
+    current.narrative = Narrative(
+        recent_catalysts=narrative_data.get("recent_catalysts", []),
+        risks=narrative_data.get("risks", []),
+        changed_since_last=narrative_data.get("changed_since_last"),
+    )
+    current.meta = Meta(
+        last_llm_update=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        sources=meta_data.get("sources", []),
+        confidence=meta_data.get("confidence"),
+    )
+
+    save_fundamentals(symbol, current)
+    return current
+
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : prompt_builder.py
+# Chemin relatif : fundamentals/prompt_builder.py
+################################################################################
+
+"""Génère le texte à copier-coller dans un chat LLM pour réviser la thèse
+et le narratif d'une action -- pas d'appel API, pas de coût en tokens.
+
+Les données numériques (hard_data) sont injectées telles quelles : le
+prompt demande explicitement au LLM de ne pas les recalculer/deviner,
+seulement de les interpréter au regard de la thèse et de l'actualité.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+
+from .schema import FundamentalSnapshot
+
+_RESPONSE_SHAPE = """{
+  "thesis": {
+    "invalidation_criteria": [
+      {"condition": "<recopie la condition telle quelle>", "status": "not_triggered|triggered"}
+    ],
+    "status": "valid|watch|invalidated",
+    "last_reviewed": "YYYY-MM-DD",
+    "review_notes": "..."
+  },
+  "narrative": {
+    "recent_catalysts": ["..."],
+    "risks": ["..."],
+    "changed_since_last": "..."
+  },
+  "meta": {
+    "sources": ["url1", "url2"],
+    "confidence": "low|medium|high"
+  }
+}"""
+
+
+def build_update_prompt(previous: FundamentalSnapshot) -> str:
+    hard_data_json = json.dumps(asdict(previous.hard_data), indent=2, ensure_ascii=False)
+    thesis_json = json.dumps(asdict(previous.thesis), indent=2, ensure_ascii=False)
+    narrative_json = json.dumps(asdict(previous.narrative), indent=2, ensure_ascii=False)
+
+    return f"""Tu es un analyste actions rigoureux. Voici les données \
+fondamentales factuelles ACTUELLES de {previous.symbol} ({previous.ticker}), \
+récupérées automatiquement via Yahoo Finance -- ne les remets pas en cause, \
+ne les recalcule pas, contente-toi de les interpréter :
+
+{hard_data_json}
+
+Voici ma thèse d'investissement actuelle :
+
+{thesis_json}
+
+Et mon narratif de la dernière revue :
+
+{narrative_json}
+
+Instructions :
+1. Recherche l'actualité récente et le contexte de marché de {previous.symbol}.
+2. Pour CHAQUE entrée de `invalidation_criteria`, indique explicitement si \
+elle est "triggered" ou "not_triggered" au vu des données ci-dessus et de \
+l'actualité -- recopie la `condition` telle quelle, ne la modifie pas.
+3. Mets à jour `status` global : "valid" si aucun critère triggered, \
+"watch" si un signal faible mais pas encore franchi, "invalidated" si un \
+critère est clairement franchi.
+4. Justifie dans `review_notes` en 2-3 phrases.
+5. Remplis `narrative.changed_since_last` : ce qui a changé depuis la \
+dernière revue.
+6. Ne parle PAS de la thèse initiale elle-même, ne la reformule pas.
+
+Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette forme, \
+rien d'autre avant ou après, pas de balises markdown :
+
+{_RESPONSE_SHAPE}
+"""
+
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : schema.py
+# Chemin relatif : fundamentals/schema.py
+################################################################################
+
+"""Types pour le pipeline de données fondamentales (actions uniquement).
+
+Suit le même style que src/schema.py du projet principal : dataclasses
+simples, tout optionnel par défaut pour rester tolérant à des données
+Yahoo manquantes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class Valuation:
+    pe_trailing: Optional[float] = None
+    pe_forward: Optional[float] = None
+    peg_ratio: Optional[float] = None
+    ev_ebitda: Optional[float] = None
+    price_to_sales: Optional[float] = None
+    price_to_book: Optional[float] = None
+
+
+@dataclass
+class Profitability:
+    fcf_eur_m: Optional[float] = None
+    fcf_yield_pct: Optional[float] = None
+    gross_margin_pct: Optional[float] = None
+    operating_margin_pct: Optional[float] = None
+    roe_pct: Optional[float] = None
+
+
+@dataclass
+class Growth:
+    revenue_growth_yoy_pct: Optional[float] = None
+    eps_growth_yoy_pct: Optional[float] = None
+
+
+@dataclass
+class BalanceSheet:
+    net_debt_eur_m: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+
+
+@dataclass
+class Analyst:
+    target_price_eur: Optional[float] = None
+    rating_consensus: Optional[str] = None
+    n_analysts: Optional[int] = None
+
+
+@dataclass
+class HardData:
+    """Données factuelles, exclusivement récupérées via Yahoo (voir
+    hard_data.py) -- jamais devinées ou remplies par un LLM."""
+
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    market_cap_eur: Optional[float] = None
+    valuation: Valuation = field(default_factory=Valuation)
+    profitability: Profitability = field(default_factory=Profitability)
+    growth: Growth = field(default_factory=Growth)
+    balance_sheet: BalanceSheet = field(default_factory=BalanceSheet)
+    analyst: Analyst = field(default_factory=Analyst)
+    source: str = "yahoo_quotesummary"
+    fetched_at: Optional[str] = None
+
+
+@dataclass
+class InvalidationCriterion:
+    condition: str
+    status: str = "not_triggered"  # not_triggered | triggered
+
+
+@dataclass
+class Thesis:
+    """État de la thèse d'investissement. `initial_thesis`,
+    `initial_date` et `invalidation_criteria[].condition` ne sont
+    jamais réécrits par le LLM (voir ingest.py) -- seuls `status`,
+    `last_reviewed`, `review_notes` et le `status` de chaque critère
+    le sont."""
+
+    initial_thesis: Optional[str] = None
+    initial_date: Optional[str] = None
+    invalidation_criteria: List[InvalidationCriterion] = field(default_factory=list)
+    status: str = "valid"  # valid | watch | invalidated
+    last_reviewed: Optional[str] = None
+    review_notes: Optional[str] = None
+
+
+@dataclass
+class Narrative:
+    recent_catalysts: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
+    changed_since_last: Optional[str] = None
+
+
+@dataclass
+class Meta:
+    last_llm_update: Optional[str] = None
+    sources: List[str] = field(default_factory=list)
+    confidence: Optional[str] = None  # low | medium | high
+
+
+@dataclass
+class FundamentalSnapshot:
+    symbol: str
+    ticker: str
+    as_of: str
+    hard_data: HardData = field(default_factory=HardData)
+    thesis: Thesis = field(default_factory=Thesis)
+    narrative: Narrative = field(default_factory=Narrative)
+    meta: Meta = field(default_factory=Meta)
+
+
+################################################################################
+# Dossier : src/fundamentals
+# Fichier : store.py
+# Chemin relatif : fundamentals/store.py
+################################################################################
+
+"""Persistance des snapshots fondamentaux :
+
+- data/fundamentals/<SYMBOL>.json        -- état courant uniquement
+- data/fundamentals/history/<SYMBOL>.jsonl -- hard_data des anciens
+  snapshots, une ligne par refresh, append-only (jamais réécrit en
+  entier), pour pouvoir tracer/plotter l'évolution des métriques dans
+  le temps. thesis.status n'est volontairement pas historisé : c'est
+  une décision consciente et révisée, pas une métrique qui varie seule.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict
+from pathlib import Path
+from typing import List, Optional
+
+from .schema import (
+    Analyst,
+    BalanceSheet,
+    FundamentalSnapshot,
+    Growth,
+    HardData,
+    InvalidationCriterion,
+    Meta,
+    Narrative,
+    Profitability,
+    Thesis,
+    Valuation,
+)
+
+FUND_DIR = Path("data/fundamentals")
+HISTORY_DIR = FUND_DIR / "history"
+
+
+def _current_path(symbol: str) -> Path:
+    return FUND_DIR / f"{symbol}.json"
+
+
+def _history_path(symbol: str) -> Path:
+    return HISTORY_DIR / f"{symbol}.jsonl"
+
+
+def _hard_data_from_dict(d: dict) -> HardData:
+    return HardData(
+        sector=d.get("sector"),
+        industry=d.get("industry"),
+        market_cap_eur=d.get("market_cap_eur"),
+        valuation=Valuation(**d.get("valuation", {})),
+        profitability=Profitability(**d.get("profitability", {})),
+        growth=Growth(**d.get("growth", {})),
+        balance_sheet=BalanceSheet(**d.get("balance_sheet", {})),
+        analyst=Analyst(**d.get("analyst", {})),
+        source=d.get("source", "yahoo_quotesummary"),
+        fetched_at=d.get("fetched_at"),
+    )
+
+
+def _thesis_from_dict(d: dict) -> Thesis:
+    return Thesis(
+        initial_thesis=d.get("initial_thesis"),
+        initial_date=d.get("initial_date"),
+        invalidation_criteria=[
+            InvalidationCriterion(**c) for c in d.get("invalidation_criteria", [])
+        ],
+        status=d.get("status", "valid"),
+        last_reviewed=d.get("last_reviewed"),
+        review_notes=d.get("review_notes"),
+    )
+
+
+def snapshot_from_dict(d: dict) -> FundamentalSnapshot:
+    return FundamentalSnapshot(
+        symbol=d["symbol"],
+        ticker=d["ticker"],
+        as_of=d["as_of"],
+        hard_data=_hard_data_from_dict(d.get("hard_data", {})),
+        thesis=_thesis_from_dict(d.get("thesis", {})),
+        narrative=Narrative(**d.get("narrative", {})),
+        meta=Meta(**d.get("meta", {})),
+    )
+
+
+def load_fundamentals(symbol: str) -> Optional[FundamentalSnapshot]:
+    path = _current_path(symbol)
+    if not path.exists():
+        return None
+    return snapshot_from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def save_fundamentals(symbol: str, snapshot: FundamentalSnapshot) -> None:
+    """Écrase le fichier courant, mais archive d'abord l'ANCIEN hard_data
+    (celui qui existait avant cet appel) dans l'historique append-only --
+    jamais celui qu'on est en train d'écrire, pour ne jamais dupliquer un
+    même snapshot deux fois dans l'historique."""
+    old = load_fundamentals(symbol)
+    if old is not None:
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"as_of": old.as_of, "hard_data": asdict(old.hard_data)}
+        with _history_path(symbol).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    FUND_DIR.mkdir(parents=True, exist_ok=True)
+    _current_path(symbol).write_text(
+        json.dumps(asdict(snapshot), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def load_history(symbol: str) -> List[dict]:
+    """Renvoie la liste des anciens snapshots hard_data, dans l'ordre
+    chronologique -- prête à être passée à chart_display_v0 ou matplotlib
+    pour tracer l'évolution d'une métrique (ex: pe_forward) dans le temps."""
+    path = _history_path(symbol)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+################################################################################
 # Dossier : src/ledger
 # Fichier : __init__.py
 # Chemin relatif : ledger/__init__.py
@@ -722,41 +1413,74 @@ def _binance_klines(symbol_pair: str, day_str: str) -> list:
     resp.raise_for_status()
     return resp.json()
 
-
 @lru_cache(maxsize=4096)
 def _yahoo_historical_price(ticker: str, day_str: str) -> tuple[float, str]:
-    """Récupère le prix de clôture et la devise via Yahoo Finance."""
-    dt = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    start_s = int(dt.timestamp())
-    end_s = int((dt + timedelta(days=1)).timestamp())
+    """Récupère la dernière clôture Yahoo disponible <= day_str.
+
+    Important : day_str peut tomber un week-end ou un jour férié.
+    On demande une fenêtre de plusieurs jours et on prend la dernière
+    bougie disponible avant ou à la date cible.
+    """
+    target = datetime.strptime(day_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    # 7 jours en arrière couvrent normalement week-ends + jours fériés.
+    period1 = int((target - timedelta(days=7)).timestamp())
+    period2 = int((target + timedelta(days=1)).timestamp())
 
     url = _YAHOO_CHART_API.format(ticker=ticker)
+
     resp = requests.get(
         url,
-        params={"period1": start_s, "period2": end_s, "interval": "1d"},
+        params={
+            "period1": period1,
+            "period2": period2,
+            "interval": "1d",
+            "events": "history",
+        },
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=10,
     )
     resp.raise_for_status()
+
     data = resp.json()
 
     result = data.get("chart", {}).get("result", [])
     if not result:
         raise PriceError(f"Yahoo n'a pas trouvé de résultat pour {ticker}")
 
-    meta = result[0].get("meta", {})
-    # NB: pas de .upper() ici -- Yahoo distingue "GBp" (pence, minuscule)
-    # de "GBP" (livres) pour les actions/ETF cotés à Londres. Écraser la
-    # casse fait perdre cette distinction et traite silencieusement un
-    # prix en pence comme un prix en livres -- erreur d'un facteur 100.
+    result = result[0]
+    meta = result.get("meta", {})
+
+    # Ne surtout pas faire .upper() : GBp != GBP.
     currency = meta.get("currency", "USD")
 
-    closes = result[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-    if not closes or closes[0] is None:
-        raise PriceError(f"Pas de prix de clôture pour {ticker} au {day_str}")
+    timestamps = result.get("timestamp", [])
+    closes = (
+        result.get("indicators", {})
+        .get("quote", [{}])[0]
+        .get("close", [])
+    )
 
-    return float(closes[0]), currency
+    candidates = []
 
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        if dt <= target:
+            candidates.append((dt, float(close)))
+
+    if not candidates:
+        raise PriceError(
+            f"Pas de clôture Yahoo disponible pour {ticker} "
+            f"au plus tard le {day_str}"
+        )
+
+    used_date, price = max(candidates, key=lambda x: x[0])
+
+    return price, currency
 
 def _get_price_from_binance(symbol: str, time: datetime) -> float:
     day_str = time.strftime("%Y-%m-%d")
