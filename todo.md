@@ -1,3 +1,0 @@
-- import deposit XTB et Binance 
-- ficher a jour 
-- plue values realisées 
