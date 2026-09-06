@@ -67,6 +67,8 @@ critère est clairement franchi.
 dernière revue.
 6. Ne parle PAS de la thèse initiale elle-même, ne la reformule pas.
 
+Le narratif doit rester qualitatif (pas de chiffres) sauf s'il cite une info de l'étape 1 avec sa source dans meta.sources,
+n'invente aucun ratio, marge ou cible de prix qui ne provient ni de hard_data ni d'une recherche sourcée.
 Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette forme, \
 rien d'autre avant ou après, pas de balises markdown :
 
