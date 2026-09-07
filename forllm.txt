@@ -192,17 +192,17 @@ if __name__ == "__main__":
 
 
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : __init__.py
-# Chemin relatif : fundamentals/__init__.py
+# Chemin relatif : fundamentals\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : cli.py
-# Chemin relatif : fundamentals/cli.py
+# Chemin relatif : fundamentals\cli.py
 ################################################################################
 
 """Point d'entrée du pipeline fondamentaux (actions uniquement).
@@ -210,14 +210,16 @@ if __name__ == "__main__":
 Usage :
   python -m src.fundamentals.cli refresh MSTR
   python -m src.fundamentals.cli refresh --all
-  python -m src.fundamentals.cli init MSTR "thèse initiale" --criteria "FCF yield < 3%" "..."
-  python -m src.fundamentals.cli prompt MSTR
-  python -m src.fundamentals.cli ingest MSTR reponse.json
+  python -m src.fundamentals.cli thesis-init MSTR "thèse initiale" \\
+      --criteria fcf_yield:"FCF yield < 3%" guidance:"guidance revue à la baisse"
+  python -m src.fundamentals.cli review-prompt --all
+  python -m src.fundamentals.cli review-ingest reponse.json
 
-`refresh` n'appelle aucun LLM (juste Yahoo, gratuit) -- peut tourner aussi
-souvent que voulu, y compris à chaque build_wallet.py. `prompt`/`ingest`
-sont le flux manuel : tu copies le texte affiché par `prompt` dans un
-chat, tu sauvegardes sa réponse JSON dans un fichier, puis `ingest`.
+`refresh` n'appelle aucun LLM (juste Yahoo, gratuit) -- peut tourner
+aussi souvent que voulu. `review-prompt`/`review-ingest` sont le flux
+manuel de revue hebdomadaire : tu copies le texte affiché par
+`review-prompt` dans un chat, tu sauvegardes sa réponse JSON dans un
+fichier, puis `review-ingest`.
 """
 
 from __future__ import annotations
@@ -229,12 +231,23 @@ from pathlib import Path
 from ..schema import AssetKind
 from ..store.serialize import load_wallet
 from .hard_data import fetch_hard_data
-from .ingest import ingest_response
-from .prompt_builder import build_update_prompt
-from .schema import FundamentalSnapshot, InvalidationCriterion, Thesis
+from .ingest import ingest_weekly_review
+from .prompt_builder import build_weekly_review_prompt
+from .schema import FundamentalSnapshot
 from .store import load_fundamentals, save_fundamentals
+from .schema import InvalidationCriterion, ThesisDefinition
+from .store import load_thesis, save_thesis
 
 TX_STORE_PATH = Path("./data/tx_store.json")
+
+
+def _stock_symbols(tx_store) -> dict[str, str]:
+    """Renvoie {symbol: ticker} pour les actions du wallet uniquement."""
+    return {
+        symbol: asset.identifiers.ticker
+        for symbol, asset in tx_store.assets.items()
+        if asset.kind == AssetKind.STOCK and asset.identifiers.ticker
+    }
 
 
 def _refresh_one(symbol: str, ticker: str) -> None:
@@ -254,42 +267,70 @@ def _refresh_one(symbol: str, ticker: str) -> None:
 def cmd_refresh(args: argparse.Namespace) -> None:
     tx_store = load_wallet(TX_STORE_PATH)
     if args.all:
-        for symbol, asset in tx_store.assets.items():
-            if asset.kind != AssetKind.STOCK or not asset.identifiers.ticker:
-                continue
-            _refresh_one(symbol, asset.identifiers.ticker)
+        for symbol, ticker in _stock_symbols(tx_store).items():
+            _refresh_one(symbol, ticker)
     else:
         asset = tx_store.assets.get(args.symbol)
         ticker = asset.identifiers.ticker if asset and asset.identifiers.ticker else args.symbol
         _refresh_one(args.symbol, ticker)
 
 
-def cmd_init(args: argparse.Namespace) -> None:
-    current = load_fundamentals(args.symbol)
-    if current is None:
-        print(f"  [ERREUR] lance d'abord 'refresh {args.symbol}' pour cr\u00e9er le hard_data")
+def cmd_thesis_init(args: argparse.Namespace) -> None:
+    if load_thesis(args.symbol) is not None and not args.force:
+        print(f"  [ERREUR] une thèse existe déjà pour {args.symbol} (--force pour écraser)")
         return
-    current.thesis = Thesis(
-        initial_thesis=args.thesis,
-        initial_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        invalidation_criteria=[InvalidationCriterion(condition=c) for c in (args.criteria or [])],
-        status="valid",
+
+    tx_store = load_wallet(TX_STORE_PATH)
+    asset = tx_store.assets.get(args.symbol)
+    ticker = asset.identifiers.ticker if asset and asset.identifiers.ticker else args.symbol
+
+    criteria = []
+    for raw in args.criteria or []:
+        crit_id, _, condition = raw.partition(":")
+        if not condition:
+            print(f"  [ERREUR] critère mal formé (attendu id:condition) : {raw!r}")
+            return
+        criteria.append(InvalidationCriterion(id=crit_id, condition=condition))
+
+    thesis = ThesisDefinition(
+        symbol=args.symbol,
+        ticker=ticker,
+        text=args.thesis,
+        invalidation_criteria=criteria,
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
-    save_fundamentals(args.symbol, current)
-    print(f"  \u2713 Th\u00e8se initiale enregistr\u00e9e pour {args.symbol}")
+    save_thesis(args.symbol, thesis)
+    print(f"  \u2713 Th\u00e8se enregistr\u00e9e pour {args.symbol} ({len(criteria)} crit\u00e8re(s))")
 
 
-def cmd_prompt(args: argparse.Namespace) -> None:
-    current = load_fundamentals(args.symbol)
-    if current is None:
-        print(f"  [ERREUR] aucun fichier pour {args.symbol}, lance d'abord 'refresh'")
+def cmd_review_prompt(args: argparse.Namespace) -> None:
+    tx_store = load_wallet(TX_STORE_PATH)
+    stock_symbols = _stock_symbols(tx_store)
+
+    symbols = list(stock_symbols) if args.all else args.symbols
+    theses, fundamentals = [], {}
+    for symbol in symbols:
+        thesis = load_thesis(symbol)
+        snapshot = load_fundamentals(symbol)
+        if thesis is None:
+            print(f"  [SKIP] pas de thèse pour {symbol} (lance 'thesis-init' d'abord)")
+            continue
+        if snapshot is None:
+            print(f"  [SKIP] pas de hard_data pour {symbol} (lance 'refresh {symbol}' d'abord)")
+            continue
+        theses.append(thesis)
+        fundamentals[symbol] = snapshot
+
+    if not theses:
+        print("  [ERREUR] aucun actif prêt pour la revue")
         return
-    print(build_update_prompt(current))
+
+    print(build_weekly_review_prompt(theses, fundamentals))
 
 
-def cmd_ingest(args: argparse.Namespace) -> None:
-    ingest_response(args.symbol, Path(args.response_file))
-    print(f"  \u2713 {args.symbol} mis \u00e0 jour \u00e0 partir de {args.response_file}")
+def cmd_review_ingest(args: argparse.Namespace) -> None:
+    ingested = ingest_weekly_review(Path(args.response_file))
+    print(f"  \u2713 {len(ingested)} actif(s) mis \u00e0 jour : {', '.join(ingested)}")
 
 
 def main() -> None:
@@ -301,20 +342,21 @@ def main() -> None:
     p_refresh.add_argument("--all", action="store_true", help="Toutes les actions du wallet")
     p_refresh.set_defaults(func=cmd_refresh)
 
-    p_init = sub.add_parser("init", help="Enregistre la th\u00e8se initiale")
-    p_init.add_argument("symbol")
-    p_init.add_argument("thesis")
-    p_init.add_argument("--criteria", nargs="*", help="Crit\u00e8res d'invalidation, un par argument")
-    p_init.set_defaults(func=cmd_init)
+    p_thesis = sub.add_parser("thesis-init", help="Enregistre la thèse et ses critères d'invalidation")
+    p_thesis.add_argument("symbol")
+    p_thesis.add_argument("thesis")
+    p_thesis.add_argument("--criteria", nargs="*", help="Un par argument, format id:condition")
+    p_thesis.add_argument("--force", action="store_true", help="Écrase une thèse existante")
+    p_thesis.set_defaults(func=cmd_thesis_init)
 
-    p_prompt = sub.add_parser("prompt", help="Affiche le prompt \u00e0 copier-coller")
-    p_prompt.add_argument("symbol")
-    p_prompt.set_defaults(func=cmd_prompt)
+    p_review_prompt = sub.add_parser("review-prompt", help="Génère le prompt de revue hebdo (batch)")
+    p_review_prompt.add_argument("symbols", nargs="*", help="Symboles à revoir (ignoré si --all)")
+    p_review_prompt.add_argument("--all", action="store_true", help="Toutes les actions ayant une thèse")
+    p_review_prompt.set_defaults(func=cmd_review_prompt)
 
-    p_ingest = sub.add_parser("ingest", help="Ing\u00e8re la r\u00e9ponse LLM coll\u00e9e dans un fichier")
-    p_ingest.add_argument("symbol")
-    p_ingest.add_argument("response_file")
-    p_ingest.set_defaults(func=cmd_ingest)
+    p_review_ingest = sub.add_parser("review-ingest", help="Ingère la réponse LLM batch collée dans un fichier")
+    p_review_ingest.add_argument("response_file")
+    p_review_ingest.set_defaults(func=cmd_review_ingest)
 
     args = parser.parse_args()
     args.func(args)
@@ -323,11 +365,10 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : hard_data.py
-# Chemin relatif : fundamentals/hard_data.py
+# Chemin relatif : fundamentals\hard_data.py
 ################################################################################
 
 """Récupération des données fondamentales factuelles ("hard data") d'une
@@ -476,15 +517,16 @@ def fetch_hard_data(ticker: str) -> Optional[HardData]:
     )
 
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : ingest.py
-# Chemin relatif : fundamentals/ingest.py
+# Chemin relatif : fundamentals\ingest.py
 ################################################################################
 
-"""Ingestion de la réponse LLM collée en retour du prompt généré par
-prompt_builder.py -- ne touche jamais à hard_data (déjà à jour, factuel,
-géré par hard_data.py) ni à initial_thesis/initial_date (posés une fois
-via cli.py `init`), uniquement au statut de la thèse et au narratif.
+"""Ingestion de la réponse LLM collée en retour du prompt batch généré
+par prompt_builder.build_weekly_review_prompt -- ne touche jamais à
+ThesisDefinition (thèse, critères, ids -- immuables, posés une seule
+fois via cli.py thesis-init), uniquement en append dans
+evaluations/<SYMBOL>.jsonl.
 """
 
 from __future__ import annotations
@@ -493,8 +535,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .schema import FundamentalSnapshot, InvalidationCriterion, Meta, Narrative, Thesis
-from .store import load_fundamentals, save_fundamentals
+from .schema import CriterionEvaluation, ThesisEvaluation
+from .store import append_evaluation
 
 
 class IngestError(ValueError):
@@ -510,63 +552,54 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def ingest_response(symbol: str, response_path: Path) -> FundamentalSnapshot:
-    current = load_fundamentals(symbol)
-    if current is None:
-        raise IngestError(
-            f"aucun fichier courant pour {symbol} -- lance d'abord 'refresh {symbol}'"
-        )
-
+def ingest_weekly_review(response_path: Path) -> list[str]:
+    """Parse un fichier contenant la réponse JSON du LLM (une clé par
+    symbole) et append une ThesisEvaluation par symbole traité. Renvoie
+    la liste des symboles ingérés."""
     raw = response_path.read_text(encoding="utf-8")
     try:
         parsed = json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError as e:
         raise IngestError(f"réponse LLM non parsable en JSON : {e}") from e
 
-    try:
-        thesis_data = parsed["thesis"]
-        narrative_data = parsed["narrative"]
-    except KeyError as e:
-        raise IngestError(f"champ manquant dans la réponse LLM : {e}") from e
-    meta_data = parsed.get("meta", {})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ingested = []
+    for symbol, entry in parsed.items():
+        try:
+            evaluation = ThesisEvaluation(
+                evaluated_at=now,
+                criteria=[CriterionEvaluation(**c) for c in entry.get("criteria", [])],
+                overall_status=entry.get("overall_status", "valid"),
+                confidence=entry.get("confidence", "medium"),
+                summary=entry.get("summary", ""),
+                sources=entry.get("sources", []),
+            )
+        except TypeError as e:
+            raise IngestError(f"champ manquant/invalide pour {symbol} : {e}") from e
 
-    current.thesis = Thesis(
-        initial_thesis=current.thesis.initial_thesis,  # jamais réécrit par le LLM
-        initial_date=current.thesis.initial_date,        # idem
-        invalidation_criteria=[
-            InvalidationCriterion(**c) for c in thesis_data.get("invalidation_criteria", [])
-        ],
-        status=thesis_data.get("status", current.thesis.status),
-        last_reviewed=thesis_data.get("last_reviewed"),
-        review_notes=thesis_data.get("review_notes"),
-    )
-    current.narrative = Narrative(
-        recent_catalysts=narrative_data.get("recent_catalysts", []),
-        risks=narrative_data.get("risks", []),
-        changed_since_last=narrative_data.get("changed_since_last"),
-    )
-    current.meta = Meta(
-        last_llm_update=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        sources=meta_data.get("sources", []),
-        confidence=meta_data.get("confidence"),
-    )
+        append_evaluation(symbol, evaluation)
+        ingested.append(symbol)
 
-    save_fundamentals(symbol, current)
-    return current
-
+    return ingested
 
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : prompt_builder.py
-# Chemin relatif : fundamentals/prompt_builder.py
+# Chemin relatif : fundamentals\prompt_builder.py
 ################################################################################
 
-"""Génère le texte à copier-coller dans un chat LLM pour réviser la thèse
-et le narratif d'une action -- pas d'appel API, pas de coût en tokens.
+"""Génère le texte à copier-coller dans un chat LLM pour réviser, en un
+seul batch, la thèse de tous les actifs actions -- pas d'appel API, pas
+de coût en tokens automatisé.
 
-Les données numériques (hard_data) sont injectées telles quelles : le
-prompt demande explicitement au LLM de ne pas les recalculer/deviner,
-seulement de les interpréter au regard de la thèse et de l'actualité.
+Les données factuelles (hard_data) sont injectées telles quelles pour
+chaque actif : le prompt demande explicitement au LLM de ne pas les
+recalculer/deviner, seulement de les interpréter au regard de la thèse
+et de l'actualité qu'il doit rechercher lui-même.
+
+Au-delà d'une dizaine d'actifs dans un même prompt, la profondeur de
+recherche par actif tend à baisser -- au-delà, découper en plusieurs
+lots plutôt que d'agrandir un seul prompt.
 """
 
 from __future__ import annotations
@@ -575,79 +608,88 @@ import json
 from dataclasses import asdict
 
 from .schema import FundamentalSnapshot
+from .schema import ThesisDefinition
 
 _RESPONSE_SHAPE = """{
-  "thesis": {
-    "invalidation_criteria": [
-      {"condition": "<recopie la condition telle quelle>", "status": "not_triggered|triggered"}
+  "<SYMBOL>": {
+    "criteria": [
+      {"id": "<recopie l'id tel quel>", "status": "not_triggered|watch|triggered", "note": "..."}
     ],
-    "status": "valid|watch|invalidated",
-    "last_reviewed": "YYYY-MM-DD",
-    "review_notes": "..."
-  },
-  "narrative": {
-    "recent_catalysts": ["..."],
-    "risks": ["..."],
-    "changed_since_last": "..."
-  },
-  "meta": {
-    "sources": ["url1", "url2"],
-    "confidence": "low|medium|high"
+    "overall_status": "valid|watch|invalidated",
+    "confidence": "low|medium|high",
+    "summary": "...",
+    "sources": ["url1", "url2"]
   }
 }"""
 
 
-def build_update_prompt(previous: FundamentalSnapshot) -> str:
-    hard_data_json = json.dumps(asdict(previous.hard_data), indent=2, ensure_ascii=False)
-    thesis_json = json.dumps(asdict(previous.thesis), indent=2, ensure_ascii=False)
-    narrative_json = json.dumps(asdict(previous.narrative), indent=2, ensure_ascii=False)
+def build_weekly_review_prompt(
+    theses: list[ThesisDefinition],
+    fundamentals: dict[str, FundamentalSnapshot],
+) -> str:
+    payload = {}
+    for thesis in theses:
+        snapshot = fundamentals.get(thesis.symbol)
+        if snapshot is None:
+            continue
+        payload[thesis.symbol] = {
+            "ticker": thesis.ticker,
+            "thesis": thesis.text,
+            "invalidation_criteria": [
+                {"id": c.id, "condition": c.condition} for c in thesis.invalidation_criteria
+            ],
+            "hard_data": asdict(snapshot.hard_data),
+        }
 
-    return f"""Tu es un analyste actions rigoureux. Voici les données \
-fondamentales factuelles ACTUELLES de {previous.symbol} ({previous.ticker}), \
-récupérées automatiquement via Yahoo Finance -- ne les remets pas en cause, \
-ne les recalcule pas, contente-toi de les interpréter :
+    payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
 
-{hard_data_json}
+    return f"""Tu es un analyste actions rigoureux. Pour chacun des actifs \
+ci-dessous, tu disposes de : la thèse d'investissement (invariable), ses \
+critères d'invalidation (invariables, à recopier tel quel), et les \
+données fondamentales factuelles ACTUELLES (`hard_data`, récupérées \
+automatiquement via Yahoo Finance -- ne les remets pas en cause, ne les \
+recalcule pas, contente-toi de les interpréter) :
 
-Voici ma thèse d'investissement actuelle :
+{payload_json}
 
-{thesis_json}
+Instructions, pour CHAQUE actif :
+1. Recherche l'actualité récente et le contexte de marché de ce titre.
+2. Pour CHAQUE entrée de `invalidation_criteria`, recopie son `id` tel \
+quel et indique son statut au vu de `hard_data` et de l'actualité : \
+"not_triggered" (rien ne va dans ce sens), "watch" (signal faible mais \
+pas encore franchi), ou "triggered" (le critère est clairement rempli).
+3. Détermine `overall_status` : "valid" si aucun critère triggered, \
+"watch" si au moins un signal watch, "invalidated" si au moins un \
+critère triggered.
+4. Indique ton `confidence` (low/medium/high) sur cette évaluation -- \
+"low" si l'actualité trouvée est mince ou ambiguë.
+5. `summary` en 2-3 phrases : ne commente que ce qui est pertinent pour \
+la thèse ou les critères, ignore le reste de `hard_data`.
+6. `sources` : liste les URLs réellement consultées pour l'actualité.
+7. Ne reformule ni la thèse ni les critères, ne recalcule aucun chiffre \
+de `hard_data`, n'invente aucune donnée qui n'en provient pas ou d'une \
+source citée dans `sources`.
 
-Et mon narratif de la dernière revue :
-
-{narrative_json}
-
-Instructions :
-1. Recherche l'actualité récente et le contexte de marché de {previous.symbol}.
-2. Pour CHAQUE entrée de `invalidation_criteria`, indique explicitement si \
-elle est "triggered" ou "not_triggered" au vu des données ci-dessus et de \
-l'actualité -- recopie la `condition` telle quelle, ne la modifie pas.
-3. Mets à jour `status` global : "valid" si aucun critère triggered, \
-"watch" si un signal faible mais pas encore franchi, "invalidated" si un \
-critère est clairement franchi.
-4. Justifie dans `review_notes` en 2-3 phrases.
-5. Remplis `narrative.changed_since_last` : ce qui a changé depuis la \
-dernière revue.
-6. Ne parle PAS de la thèse initiale elle-même, ne la reformule pas.
-
-Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette forme, \
-rien d'autre avant ou après, pas de balises markdown :
+Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette \
+forme (une clé par symbole traité), rien d'autre avant ou après, pas de \
+balises markdown :
 
 {_RESPONSE_SHAPE}
 """
 
-
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : schema.py
-# Chemin relatif : fundamentals/schema.py
+# Chemin relatif : fundamentals\schema.py
 ################################################################################
 
-"""Types pour le pipeline de données fondamentales (actions uniquement).
+"""Types pour la thèse d'investissement et son suivi dans le temps.
 
-Suit le même style que src/schema.py du projet principal : dataclasses
-simples, tout optionnel par défaut pour rester tolérant à des données
-Yahoo manquantes.
+Séparé de fundamentals/schema.py à dessein : ThesisDefinition est écrite
+une fois (thesis-init ou édition manuelle du JSON) et ne doit JAMAIS être
+réécrite par le pipeline de revue hebdomadaire -- l'isoler dans son propre
+fichier/store rend cette invariance structurelle plutôt qu'une simple
+convention respectée par le code d'ingestion.
 """
 
 from __future__ import annotations
@@ -657,6 +699,51 @@ from typing import List, Optional
 
 
 @dataclass
+class InvalidationCriterion:
+    """Un scénario qui invaliderait la thèse. `id` et `condition` sont
+    figés une fois écrits -- le LLM les recopie tel quel dans son
+    évaluation, il ne les reformule jamais."""
+
+    id: str            # court, stable, ex: "fcf_yield", "guidance_cut"
+    condition: str      # texte libre, ex: "FCF yield tombe sous 3%"
+
+
+@dataclass
+class ThesisDefinition:
+    """La thèse elle-même -- invariable. Modifiée uniquement par une
+    action humaine explicite (thesis-init ou édition manuelle du JSON),
+    jamais par un refresh ou une revue automatique."""
+
+    symbol: str
+    ticker: str
+    text: str
+    invalidation_criteria: List[InvalidationCriterion] = field(default_factory=list)
+    created_at: str = ""
+
+
+@dataclass
+class CriterionEvaluation:
+    id: str              # recopié tel quel depuis ThesisDefinition, jamais reformulé
+    status: str            # not_triggered | watch | triggered
+    note: str = ""
+
+
+@dataclass
+class ThesisEvaluation:
+    """Une revue hebdomadaire -- immuable une fois écrite, append-only
+    dans evaluations/<SYMBOL>.jsonl. Représente l'état de la conviction
+    à un instant donné, pas une donnée qu'on corrige a posteriori."""
+
+    evaluated_at: str
+    criteria: List[CriterionEvaluation] = field(default_factory=list)
+    overall_status: str = "valid"   # valid | watch | invalidated
+    confidence: str = "medium"       # low | medium | high
+    summary: str = ""
+    sources: List[str] = field(default_factory=list)
+
+
+ 
+@dataclass
 class Valuation:
     pe_trailing: Optional[float] = None
     pe_forward: Optional[float] = None
@@ -664,8 +751,8 @@ class Valuation:
     ev_ebitda: Optional[float] = None
     price_to_sales: Optional[float] = None
     price_to_book: Optional[float] = None
-
-
+ 
+ 
 @dataclass
 class Profitability:
     fcf_eur_m: Optional[float] = None
@@ -673,32 +760,32 @@ class Profitability:
     gross_margin_pct: Optional[float] = None
     operating_margin_pct: Optional[float] = None
     roe_pct: Optional[float] = None
-
-
+ 
+ 
 @dataclass
 class Growth:
     revenue_growth_yoy_pct: Optional[float] = None
     eps_growth_yoy_pct: Optional[float] = None
-
-
+ 
+ 
 @dataclass
 class BalanceSheet:
     net_debt_eur_m: Optional[float] = None
     debt_to_equity: Optional[float] = None
-
-
+ 
+ 
 @dataclass
 class Analyst:
     target_price_eur: Optional[float] = None
     rating_consensus: Optional[str] = None
     n_analysts: Optional[int] = None
-
-
+ 
+ 
 @dataclass
 class HardData:
     """Données factuelles, exclusivement récupérées via Yahoo (voir
     hard_data.py) -- jamais devinées ou remplies par un LLM."""
-
+ 
     sector: Optional[str] = None
     industry: Optional[str] = None
     market_cap_eur: Optional[float] = None
@@ -709,69 +796,36 @@ class HardData:
     analyst: Analyst = field(default_factory=Analyst)
     source: str = "yahoo_quotesummary"
     fetched_at: Optional[str] = None
-
-
-@dataclass
-class InvalidationCriterion:
-    condition: str
-    status: str = "not_triggered"  # not_triggered | triggered
-
-
-@dataclass
-class Thesis:
-    """État de la thèse d'investissement. `initial_thesis`,
-    `initial_date` et `invalidation_criteria[].condition` ne sont
-    jamais réécrits par le LLM (voir ingest.py) -- seuls `status`,
-    `last_reviewed`, `review_notes` et le `status` de chaque critère
-    le sont."""
-
-    initial_thesis: Optional[str] = None
-    initial_date: Optional[str] = None
-    invalidation_criteria: List[InvalidationCriterion] = field(default_factory=list)
-    status: str = "valid"  # valid | watch | invalidated
-    last_reviewed: Optional[str] = None
-    review_notes: Optional[str] = None
-
-
-@dataclass
-class Narrative:
-    recent_catalysts: List[str] = field(default_factory=list)
-    risks: List[str] = field(default_factory=list)
-    changed_since_last: Optional[str] = None
-
-
-@dataclass
-class Meta:
-    last_llm_update: Optional[str] = None
-    sources: List[str] = field(default_factory=list)
-    confidence: Optional[str] = None  # low | medium | high
-
-
+ 
+ 
 @dataclass
 class FundamentalSnapshot:
+    """État courant des données factuelles d'un actif -- écrasé sans
+    risque à chaque refresh, l'historique étant géré par store.py."""
+ 
     symbol: str
     ticker: str
     as_of: str
     hard_data: HardData = field(default_factory=HardData)
-    thesis: Thesis = field(default_factory=Thesis)
-    narrative: Narrative = field(default_factory=Narrative)
-    meta: Meta = field(default_factory=Meta)
-
+ 
 
 ################################################################################
-# Dossier : src/fundamentals
+# Dossier : src\fundamentals
 # Fichier : store.py
-# Chemin relatif : fundamentals/store.py
+# Chemin relatif : fundamentals\store.py
 ################################################################################
 
 """Persistance des snapshots fondamentaux :
 
-- data/fundamentals/<SYMBOL>.json        -- état courant uniquement
+- data/fundamentals/<SYMBOL>.json        -- état courant (hard_data uniquement)
 - data/fundamentals/history/<SYMBOL>.jsonl -- hard_data des anciens
   snapshots, une ligne par refresh, append-only (jamais réécrit en
   entier), pour pouvoir tracer/plotter l'évolution des métriques dans
-  le temps. thesis.status n'est volontairement pas historisé : c'est
-  une décision consciente et révisée, pas une métrique qui varie seule.
+  le temps.
+
+La thèse d'investissement (invariable) et les évaluations hebdomadaires
+du LLM vivent dans un store séparé -- voir thesis_store.py -- justement
+pour qu'aucun refresh ici ne puisse jamais y toucher.
 """
 
 from __future__ import annotations
@@ -787,11 +841,7 @@ from .schema import (
     FundamentalSnapshot,
     Growth,
     HardData,
-    InvalidationCriterion,
-    Meta,
-    Narrative,
     Profitability,
-    Thesis,
     Valuation,
 )
 
@@ -822,28 +872,12 @@ def _hard_data_from_dict(d: dict) -> HardData:
     )
 
 
-def _thesis_from_dict(d: dict) -> Thesis:
-    return Thesis(
-        initial_thesis=d.get("initial_thesis"),
-        initial_date=d.get("initial_date"),
-        invalidation_criteria=[
-            InvalidationCriterion(**c) for c in d.get("invalidation_criteria", [])
-        ],
-        status=d.get("status", "valid"),
-        last_reviewed=d.get("last_reviewed"),
-        review_notes=d.get("review_notes"),
-    )
-
-
 def snapshot_from_dict(d: dict) -> FundamentalSnapshot:
     return FundamentalSnapshot(
         symbol=d["symbol"],
         ticker=d["ticker"],
         as_of=d["as_of"],
         hard_data=_hard_data_from_dict(d.get("hard_data", {})),
-        thesis=_thesis_from_dict(d.get("thesis", {})),
-        narrative=Narrative(**d.get("narrative", {})),
-        meta=Meta(**d.get("meta", {})),
     )
 
 
@@ -881,19 +915,18 @@ def load_history(symbol: str) -> List[dict]:
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-
 ################################################################################
-# Dossier : src/ledger
+# Dossier : src\ledger
 # Fichier : __init__.py
-# Chemin relatif : ledger/__init__.py
+# Chemin relatif : ledger\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/ledger
+# Dossier : src\ledger
 # Fichier : cost_basis.py
-# Chemin relatif : ledger/cost_basis.py
+# Chemin relatif : ledger\cost_basis.py
 ################################################################################
 
 """Calcul du cost basis (prix de revient) par méthode FIFO, et du P&L réalisé
@@ -1080,9 +1113,9 @@ def compute_fifo(tx_store: TxStore, at: Optional[datetime] = None) -> CostBasisR
 
 
 ################################################################################
-# Dossier : src/ledger
+# Dossier : src\ledger
 # Fichier : metrics.py
-# Chemin relatif : ledger/metrics.py
+# Chemin relatif : ledger\metrics.py
 ################################################################################
 
 # src/ledger/metrics.py
@@ -1230,9 +1263,9 @@ def compute_portfolio_metrics(tx_store: TxStore, lookback_days: int = 365) -> di
     }
 
 ################################################################################
-# Dossier : src/ledger
+# Dossier : src\ledger
 # Fichier : portfolio.py
-# Chemin relatif : ledger/portfolio.py
+# Chemin relatif : ledger\portfolio.py
 ################################################################################
 
 """Calcul de la valorisation du portefeuille à une date donnée.
@@ -1295,9 +1328,9 @@ def portfolio_snapshot_at(tx_store: TxStore, at: Optional[datetime] = None) -> d
     }
 
 ################################################################################
-# Dossier : src/ledger
+# Dossier : src\ledger
 # Fichier : positions.py
-# Chemin relatif : ledger/positions.py
+# Chemin relatif : ledger\positions.py
 ################################################################################
 
 """Reconstruction des positions (quantités détenues) à partir du log de
@@ -1364,17 +1397,17 @@ def non_zero_holdings_at(tx_store: TxStore, at: Optional[datetime] = None) -> Di
 
 
 ################################################################################
-# Dossier : src/market
+# Dossier : src\market
 # Fichier : __init__.py
-# Chemin relatif : market/__init__.py
+# Chemin relatif : market\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/market
+# Dossier : src\market
 # Fichier : prices.py
-# Chemin relatif : market/prices.py
+# Chemin relatif : market\prices.py
 ################################################################################
 
 """Équivalent Python de pf_price::historical_price_eur.
@@ -1566,9 +1599,9 @@ def historical_price_eur(symbol: str, time: datetime, kind: AssetKind, ticker: O
     return 0.0
 
 ################################################################################
-# Dossier : src/market
+# Dossier : src\market
 # Fichier : tickers.py
-# Chemin relatif : market/tickers.py
+# Chemin relatif : market\tickers.py
 ################################################################################
 
 """src/tickers.py
@@ -1705,17 +1738,17 @@ def resolve_ticker(symbol: str, kind: AssetKind) -> Optional[str]:
     return None
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : __init__.py
-# Chemin relatif : parse/__init__.py
+# Chemin relatif : parse\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : binance.py
-# Chemin relatif : parse/binance.py
+# Chemin relatif : parse\binance.py
 ################################################################################
 
 """Équivalent Python de pf_extract::binance (parse_trades, parse_converts)."""
@@ -1933,9 +1966,9 @@ def parse_converts(path: Path) -> list[Transaction]:
 
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : manual.py
-# Chemin relatif : parse/manual.py
+# Chemin relatif : parse\manual.py
 ################################################################################
 
 # src/parse/manual.py
@@ -1989,9 +2022,9 @@ def parse_manual(path: Path) -> list[Transaction]:
     return out
 
 ################################################################################
-# Dossier : src/parse
+# Dossier : src\parse
 # Fichier : xtb.py
-# Chemin relatif : parse/xtb.py
+# Chemin relatif : parse\xtb.py
 ################################################################################
 
 """Équivalent Python de pf_extract::xtb (positions ouvertes/fermées XTB)."""
@@ -2402,17 +2435,17 @@ def parse_cash_operations(path: Path, sheet_name: str) -> list[Transaction]:
         wb.close()
 
 ################################################################################
-# Dossier : src/report
+# Dossier : src\report
 # Fichier : __init__.py
-# Chemin relatif : report/__init__.py
+# Chemin relatif : report\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/report
+# Dossier : src\report
 # Fichier : llm_prompt.py
-# Chemin relatif : report/llm_prompt.py
+# Chemin relatif : report\llm_prompt.py
 ################################################################################
 
 # src/report/llm_prompt.py
@@ -2671,25 +2704,25 @@ class Transaction:
 
 
 ################################################################################
-# Dossier : src/store
+# Dossier : src\store
 # Fichier : __init__.py
-# Chemin relatif : store/__init__.py
+# Chemin relatif : store\__init__.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/store
+# Dossier : src\store
 # Fichier : registery.py
-# Chemin relatif : store/registery.py
+# Chemin relatif : store\registery.py
 ################################################################################
 
 
 
 ################################################################################
-# Dossier : src/store
+# Dossier : src\store
 # Fichier : serialize.py
-# Chemin relatif : store/serialize.py
+# Chemin relatif : store\serialize.py
 ################################################################################
 
 from __future__ import annotations

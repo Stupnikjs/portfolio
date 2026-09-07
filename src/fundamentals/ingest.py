@@ -1,7 +1,8 @@
-"""Ingestion de la réponse LLM collée en retour du prompt généré par
-prompt_builder.py -- ne touche jamais à hard_data (déjà à jour, factuel,
-géré par hard_data.py) ni à initial_thesis/initial_date (posés une fois
-via cli.py `init`), uniquement au statut de la thèse et au narratif.
+"""Ingestion de la réponse LLM collée en retour du prompt batch généré
+par prompt_builder.build_weekly_review_prompt -- ne touche jamais à
+ThesisDefinition (thèse, critères, ids -- immuables, posés une seule
+fois via cli.py thesis-init), uniquement en append dans
+evaluations/<SYMBOL>.jsonl.
 """
 
 from __future__ import annotations
@@ -10,8 +11,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .schema import FundamentalSnapshot, InvalidationCriterion, Meta, Narrative, Thesis
-from .store import load_fundamentals, save_fundamentals
+from .schema import CriterionEvaluation, ThesisEvaluation
+from .store import append_evaluation
 
 
 class IngestError(ValueError):
@@ -27,46 +28,32 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def ingest_response(symbol: str, response_path: Path) -> FundamentalSnapshot:
-    current = load_fundamentals(symbol)
-    if current is None:
-        raise IngestError(
-            f"aucun fichier courant pour {symbol} -- lance d'abord 'refresh {symbol}'"
-        )
-
+def ingest_weekly_review(response_path: Path) -> list[str]:
+    """Parse un fichier contenant la réponse JSON du LLM (une clé par
+    symbole) et append une ThesisEvaluation par symbole traité. Renvoie
+    la liste des symboles ingérés."""
     raw = response_path.read_text(encoding="utf-8")
     try:
         parsed = json.loads(_strip_code_fences(raw))
     except json.JSONDecodeError as e:
         raise IngestError(f"réponse LLM non parsable en JSON : {e}") from e
 
-    try:
-        thesis_data = parsed["thesis"]
-        narrative_data = parsed["narrative"]
-    except KeyError as e:
-        raise IngestError(f"champ manquant dans la réponse LLM : {e}") from e
-    meta_data = parsed.get("meta", {})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ingested = []
+    for symbol, entry in parsed.items():
+        try:
+            evaluation = ThesisEvaluation(
+                evaluated_at=now,
+                criteria=[CriterionEvaluation(**c) for c in entry.get("criteria", [])],
+                overall_status=entry.get("overall_status", "valid"),
+                confidence=entry.get("confidence", "medium"),
+                summary=entry.get("summary", ""),
+                sources=entry.get("sources", []),
+            )
+        except TypeError as e:
+            raise IngestError(f"champ manquant/invalide pour {symbol} : {e}") from e
 
-    current.thesis = Thesis(
-        initial_thesis=current.thesis.initial_thesis,  # jamais réécrit par le LLM
-        initial_date=current.thesis.initial_date,        # idem
-        invalidation_criteria=[
-            InvalidationCriterion(**c) for c in thesis_data.get("invalidation_criteria", [])
-        ],
-        status=thesis_data.get("status", current.thesis.status),
-        last_reviewed=thesis_data.get("last_reviewed"),
-        review_notes=thesis_data.get("review_notes"),
-    )
-    current.narrative = Narrative(
-        recent_catalysts=narrative_data.get("recent_catalysts", []),
-        risks=narrative_data.get("risks", []),
-        changed_since_last=narrative_data.get("changed_since_last"),
-    )
-    current.meta = Meta(
-        last_llm_update=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        sources=meta_data.get("sources", []),
-        confidence=meta_data.get("confidence"),
-    )
+        append_evaluation(symbol, evaluation)
+        ingested.append(symbol)
 
-    save_fundamentals(symbol, current)
-    return current
+    return ingested

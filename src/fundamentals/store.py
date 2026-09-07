@@ -1,11 +1,14 @@
 """Persistance des snapshots fondamentaux :
 
-- data/fundamentals/<SYMBOL>.json        -- état courant uniquement
+- data/fundamentals/<SYMBOL>.json        -- état courant (hard_data uniquement)
 - data/fundamentals/history/<SYMBOL>.jsonl -- hard_data des anciens
   snapshots, une ligne par refresh, append-only (jamais réécrit en
   entier), pour pouvoir tracer/plotter l'évolution des métriques dans
-  le temps. thesis.status n'est volontairement pas historisé : c'est
-  une décision consciente et révisée, pas une métrique qui varie seule.
+  le temps.
+
+La thèse d'investissement (invariable) et les évaluations hebdomadaires
+du LLM vivent dans un store séparé -- voir thesis_store.py -- justement
+pour qu'aucun refresh ici ne puisse jamais y toucher.
 """
 
 from __future__ import annotations
@@ -21,11 +24,7 @@ from .schema import (
     FundamentalSnapshot,
     Growth,
     HardData,
-    InvalidationCriterion,
-    Meta,
-    Narrative,
     Profitability,
-    Thesis,
     Valuation,
 )
 
@@ -56,28 +55,12 @@ def _hard_data_from_dict(d: dict) -> HardData:
     )
 
 
-def _thesis_from_dict(d: dict) -> Thesis:
-    return Thesis(
-        initial_thesis=d.get("initial_thesis"),
-        initial_date=d.get("initial_date"),
-        invalidation_criteria=[
-            InvalidationCriterion(**c) for c in d.get("invalidation_criteria", [])
-        ],
-        status=d.get("status", "valid"),
-        last_reviewed=d.get("last_reviewed"),
-        review_notes=d.get("review_notes"),
-    )
-
-
 def snapshot_from_dict(d: dict) -> FundamentalSnapshot:
     return FundamentalSnapshot(
         symbol=d["symbol"],
         ticker=d["ticker"],
         as_of=d["as_of"],
         hard_data=_hard_data_from_dict(d.get("hard_data", {})),
-        thesis=_thesis_from_dict(d.get("thesis", {})),
-        narrative=Narrative(**d.get("narrative", {})),
-        meta=Meta(**d.get("meta", {})),
     )
 
 

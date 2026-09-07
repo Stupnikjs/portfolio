@@ -1,9 +1,15 @@
-"""Génère le texte à copier-coller dans un chat LLM pour réviser la thèse
-et le narratif d'une action -- pas d'appel API, pas de coût en tokens.
+"""Génère le texte à copier-coller dans un chat LLM pour réviser, en un
+seul batch, la thèse de tous les actifs actions -- pas d'appel API, pas
+de coût en tokens automatisé.
 
-Les données numériques (hard_data) sont injectées telles quelles : le
-prompt demande explicitement au LLM de ne pas les recalculer/deviner,
-seulement de les interpréter au regard de la thèse et de l'actualité.
+Les données factuelles (hard_data) sont injectées telles quelles pour
+chaque actif : le prompt demande explicitement au LLM de ne pas les
+recalculer/deviner, seulement de les interpréter au regard de la thèse
+et de l'actualité qu'il doit rechercher lui-même.
+
+Au-delà d'une dizaine d'actifs dans un même prompt, la profondeur de
+recherche par actif tend à baisser -- au-delà, découper en plusieurs
+lots plutôt que d'agrandir un seul prompt.
 """
 
 from __future__ import annotations
@@ -12,65 +18,71 @@ import json
 from dataclasses import asdict
 
 from .schema import FundamentalSnapshot
+from .schema import ThesisDefinition
 
 _RESPONSE_SHAPE = """{
-  "thesis": {
-    "invalidation_criteria": [
-      {"condition": "<recopie la condition telle quelle>", "status": "not_triggered|triggered"}
+  "<SYMBOL>": {
+    "criteria": [
+      {"id": "<recopie l'id tel quel>", "status": "not_triggered|watch|triggered", "note": "..."}
     ],
-    "status": "valid|watch|invalidated",
-    "last_reviewed": "YYYY-MM-DD",
-    "review_notes": "..."
-  },
-  "narrative": {
-    "recent_catalysts": ["..."],
-    "risks": ["..."],
-    "changed_since_last": "..."
-  },
-  "meta": {
-    "sources": ["url1", "url2"],
-    "confidence": "low|medium|high"
+    "overall_status": "valid|watch|invalidated",
+    "confidence": "low|medium|high",
+    "summary": "...",
+    "sources": ["url1", "url2"]
   }
 }"""
 
 
-def build_update_prompt(previous: FundamentalSnapshot) -> str:
-    hard_data_json = json.dumps(asdict(previous.hard_data), indent=2, ensure_ascii=False)
-    thesis_json = json.dumps(asdict(previous.thesis), indent=2, ensure_ascii=False)
-    narrative_json = json.dumps(asdict(previous.narrative), indent=2, ensure_ascii=False)
+def build_weekly_review_prompt(
+    theses: list[ThesisDefinition],
+    fundamentals: dict[str, FundamentalSnapshot],
+) -> str:
+    payload = {}
+    for thesis in theses:
+        snapshot = fundamentals.get(thesis.symbol)
+        if snapshot is None:
+            continue
+        payload[thesis.symbol] = {
+            "ticker": thesis.ticker,
+            "thesis": thesis.text,
+            "invalidation_criteria": [
+                {"id": c.id, "condition": c.condition} for c in thesis.invalidation_criteria
+            ],
+            "hard_data": asdict(snapshot.hard_data),
+        }
 
-    return f"""Tu es un analyste actions rigoureux. Voici les données \
-fondamentales factuelles ACTUELLES de {previous.symbol} ({previous.ticker}), \
-récupérées automatiquement via Yahoo Finance -- ne les remets pas en cause, \
-ne les recalcule pas, contente-toi de les interpréter :
+    payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
 
-{hard_data_json}
+    return f"""Tu es un analyste actions rigoureux. Pour chacun des actifs \
+ci-dessous, tu disposes de : la thèse d'investissement (invariable), ses \
+critères d'invalidation (invariables, à recopier tel quel), et les \
+données fondamentales factuelles ACTUELLES (`hard_data`, récupérées \
+automatiquement via Yahoo Finance -- ne les remets pas en cause, ne les \
+recalcule pas, contente-toi de les interpréter) :
 
-Voici ma thèse d'investissement actuelle :
+{payload_json}
 
-{thesis_json}
+Instructions, pour CHAQUE actif :
+1. Recherche l'actualité récente et le contexte de marché de ce titre.
+2. Pour CHAQUE entrée de `invalidation_criteria`, recopie son `id` tel \
+quel et indique son statut au vu de `hard_data` et de l'actualité : \
+"not_triggered" (rien ne va dans ce sens), "watch" (signal faible mais \
+pas encore franchi), ou "triggered" (le critère est clairement rempli).
+3. Détermine `overall_status` : "valid" si aucun critère triggered, \
+"watch" si au moins un signal watch, "invalidated" si au moins un \
+critère triggered.
+4. Indique ton `confidence` (low/medium/high) sur cette évaluation -- \
+"low" si l'actualité trouvée est mince ou ambiguë.
+5. `summary` en 2-3 phrases : ne commente que ce qui est pertinent pour \
+la thèse ou les critères, ignore le reste de `hard_data`.
+6. `sources` : liste les URLs réellement consultées pour l'actualité.
+7. Ne reformule ni la thèse ni les critères, ne recalcule aucun chiffre \
+de `hard_data`, n'invente aucune donnée qui n'en provient pas ou d'une \
+source citée dans `sources`.
 
-Et mon narratif de la dernière revue :
-
-{narrative_json}
-
-Instructions :
-1. Recherche l'actualité récente et le contexte de marché de {previous.symbol}.
-2. Pour CHAQUE entrée de `invalidation_criteria`, indique explicitement si \
-elle est "triggered" ou "not_triggered" au vu des données ci-dessus et de \
-l'actualité -- recopie la `condition` telle quelle, ne la modifie pas.
-3. Mets à jour `status` global : "valid" si aucun critère triggered, \
-"watch" si un signal faible mais pas encore franchi, "invalidated" si un \
-critère est clairement franchi.
-4. Justifie dans `review_notes` en 2-3 phrases.
-5. Remplis `narrative.changed_since_last` : ce qui a changé depuis la \
-dernière revue.
-6. Ne parle PAS de la thèse initiale elle-même, ne la reformule pas.
-
-Le narratif doit rester qualitatif (pas de chiffres) sauf s'il cite une info de l'étape 1 avec sa source dans meta.sources,
-n'invente aucun ratio, marge ou cible de prix qui ne provient ni de hard_data ni d'une recherche sourcée.
-Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette forme, \
-rien d'autre avant ou après, pas de balises markdown :
+Réponds UNIQUEMENT avec un JSON valide respectant EXACTEMENT cette \
+forme (une clé par symbole traité), rien d'autre avant ou après, pas de \
+balises markdown :
 
 {_RESPONSE_SHAPE}
 """
