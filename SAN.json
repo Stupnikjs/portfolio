@@ -1,0 +1,14 @@
+{
+  "symbol": "SAN",
+  "ticker": "SAN",
+  "text": "Sanofi est sous-valorisée (P/E forward significativement sous sa médiane historique) au regard d'un pipeline late-stage étoffé, d'une diversification thérapeutique réelle (immunologie, maladies rares, neurologie, vaccins) et d'une exposition géographique équilibrée peu dépendante du marché français.",
+  "invalidation_criteria": [
+    {"id": "pe_rerating", "condition": "Le P/E forward Yahoo repasse durablement au-dessus de sa médiane historique (~16-18x) sans baisse de bénéfices sous-jacente"},
+    {"id": "earnings_erosion", "condition": "Croissance EPS ou FCF yoy négative sur 2 trimestres consécutifs"},
+    {"id": "pipeline_shrink", "condition": "Le nombre de projets en phase 3/soumis passe sous 15-18 (contre 24 actuellement)"},
+    {"id": "dupixent_concentration", "condition": "Dupixent dépasse ~35% des ventes nettes biopharma"},
+    {"id": "us_policy_shock", "condition": "Réforme de pricing US (IRA/MFN) ou décision réglementaire faisant chuter les ventes US sur au moins un trimestre"},
+    {"id": "dividend_cut", "condition": "Le dividende est coupé ou gelé après 30 ans de hausses consécutives"}
+  ],
+  "created_at": "2026-09-07"
+}

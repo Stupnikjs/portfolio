@@ -26,10 +26,8 @@ from ..store.serialize import load_wallet
 from .hard_data import fetch_hard_data
 from .ingest import ingest_weekly_review
 from .prompt_builder import build_weekly_review_prompt
-from .schema import FundamentalSnapshot
-from .store import load_fundamentals, save_fundamentals
-from .schema import InvalidationCriterion, ThesisDefinition
-from .store import load_thesis, save_thesis
+from .schema import FundamentalSnapshot, InvalidationCriterion, ThesisDefinition
+from .store import load_fundamentals, load_thesis, save_fundamentals, save_thesis
 
 TX_STORE_PATH = Path("./data/tx_store.json")
 
