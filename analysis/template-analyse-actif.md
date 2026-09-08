@@ -1,150 +1,72 @@
-# Analyse fondamentale — [NOM DE L'ACTIF] ([TICKER])
+# [TICKER] — Analyse fondamentale — [DATE]
 
-> **Date de la revue :** JJ/MM/AAAA
-> **Dernière revue :** JJ/MM/AAAA (ou "première analyse")
-> **Sources utilisées :** (ex: rapport annuel, site relations investisseurs, Yahoo Finance, Bloomberg...)
+## Fondamentaux
 
----
-
-## 1. Identification
-
-| Champ | Valeur |
-|---|---|
-| Nom complet | |
-| Ticker | |
-| Secteur (GICS/ICB) | |
-| Sous-secteur | |
-| Capitalisation boursière | |
-| Devise de cotation | |
-| Cours au moment de la revue | |
-
----
-
-## 2. Données financières fondamentales
-
-### Valorisation
 | Métrique | Valeur | Précédente |
 |---|---|---|
-| PE trailing | | |
-| PE forward | | |
+| PE trailing / forward | | |
 | EV/EBITDA | | |
-| PEG ratio | | |
+| PEG | | |
 | Price/Book | | |
 | FCF yield | | |
-
-### Croissance
-| Métrique | Valeur | Précédente |
-|---|---|---|
-| Croissance CA (YoY) | | |
-| Croissance CA (CAGR 3 ans) | | |
-| Croissance EPS (YoY) | | |
-| Croissance EPS (CAGR 3 ans) | | |
-
-### Rentabilité
-| Métrique | Valeur | Précédente |
-|---|---|---|
-| Marge opérationnelle | | |
-| Marge nette | | |
-| ROIC | | |
-| ROE | | |
-
-### Solidité financière
-| Métrique | Valeur | Précédente |
-|---|---|---|
-| Dette nette / EBITDA | | |
-| Ratio de couverture des intérêts | | |
+| Croissance CA (YoY / CAGR 3a) | | |
+| Croissance EPS (YoY / CAGR 3a) | | |
+| Marge opérationnelle / nette | | |
+| ROIC / ROE | | |
+| Dette nette/EBITDA | | |
+| Couverture des intérêts | | |
 | Current ratio | | |
+| FCF / marge FCF / capex-CA | | |
+| Dividende : rendement / payout / années conséc. | | |
 
-### Cash
-| Métrique | Valeur | Précédente |
-|---|---|---|
-| FCF | | |
-| Marge FCF | | |
-| Capex / CA | | |
+## Secteur
 
-### Dividende (si applicable)
-| Métrique | Valeur | Précédente |
-|---|---|---|
-| Rendement | | |
-| Payout ratio | | |
-| Années consécutives de croissance | | |
+- TAM & CAGR attendu :
+- Principaux acteurs / barrières à l'entrée :
+- Position (leader / challenger / niche) :
+- Tendances structurelles (régulation, techno, macro) :
 
----
+## Comparaison pairs
 
-## 3. Analyse du secteur
+⚠️ Perf. boursière et cap ne suffisent jamais seules — toujours croiser avec valorisation + croissance + rentabilité/risque. Choisir 2-4 pairs réellement comparables (sous-secteur, taille proche), pas les plus gros noms du secteur.
 
-**Taille et croissance du marché**
-- TAM estimé :
-- Taux de croissance attendu (CAGR) :
-
-**Dynamique concurrentielle**
-- Principaux acteurs :
-- Barrières à l'entrée :
-- Position de l'actif dans ce paysage (leader / challenger / niche) :
-
-**Tendances structurelles**
-- Régulation :
-- Technologie :
-- Démographie / macro :
-
----
-
-## 4. Comparaison aux moyennes sectorielles
-
-⚠️ **La performance boursière (1 an, 3 ans) et la capitalisation ne sont PAS des métriques de comparaison suffisantes à elles seules** — elles disent qu'un titre a sous/sur-performé, jamais pourquoi, ni s'il reste du potentiel ou si le marché a déjà correctement réévalué le prix. Toujours les compléter avec au moins valorisation + croissance + un indicateur de rentabilité/risque ci-dessous. Choisir 2-4 pairs réellement comparables (même sous-secteur, taille proche) plutôt que les plus gros noms du secteur au sens large, qui faussent la comparaison si leur narratif de croissance est différent (ex: éviter de comparer une big pharma diversifiée à un pur acteur GLP-1 en forte croissance).
-
-### 4a. Comparaison par pair (métriques individuelles)
-
-| Société | Cap. | PE forward (même année) | EV/EBITDA ou EV/CA | Rendement dividende | Croissance CA attendue | Concentration produit/segment phare | Perf. 1 an | Perf. 3 ans |
+| Société | Cap | PE fwd | EV/EBITDA ou EV/CA | Div. yield | Croissance CA attendue | Concentration produit | Perf 1a | Perf 3a |
 |---|---|---|---|---|---|---|---|---|
 | **[Actif]** | | | | | | | | |
 | Pair 1 | | | | | | | | |
 | Pair 2 | | | | | | | | |
-| Pair 3 | | | | | | | | |
-| Moyenne pairs | | | | | | | | |
+| Moyenne | | | | | | | | |
 
-*(ajouter/retirer des colonnes selon ce qui est pertinent pour ce secteur — ex: ARPU pour la tech, sinistralité pour l'assurance, NIM pour la banque)*
+*(ajuster colonnes selon secteur : ARPU, sinistralité, NIM...)*
 
-### 4b. Lecture croisée performance × valorisation
+**Lecture croisée**
+- Sous/sur-perf vs pairs sur 1-3a ?
+- Valorisation relative actuelle (PE/EV fwd vs pairs) ?
+- Croissance attendue justifie-t-elle l'écart, ou comparable à pairs mieux valorisés ?
+- Conclusion : sous-perf déjà price-in, ou décalage non expliqué ?
 
-| Question | Réponse factuelle |
-|---|---|
-| L'actif a-t-il sous/sur-performé ses pairs sur 1-3 ans ? | |
-| À quelle valorisation relative (PE/EV forward vs pairs) se traite-t-il aujourd'hui ? | |
-| La croissance attendue justifie-t-elle l'écart de valorisation, ou est-elle comparable à des pairs mieux valorisés ? | |
-| Conclusion : sous-performance déjà price-in, ou décalage non expliqué par les fondamentaux ? | |
+*(Signal de rattrapage réel = sous-perf passée + valo nettement inférieure + croissance comparable/supérieure. Sinon : pas de signal, marché probablement déjà ajusté.)*
 
-*(Le seul cas qui signale un vrai potentiel de rattrapage : sous-performance passée + valorisation nettement inférieure aux pairs + croissance attendue comparable ou supérieure. Sous-performance + valorisation déjà alignée sur les pairs = pas de signal particulier, le marché a probablement déjà ajusté.)*
+## Événements à venir
 
----
+| Date | Événement | Impact attendu |
+|---|---|---|
+| | (résultats, guidance, AMM, décision réglementaire, lancement produit, expiration lock-up...) | |
 
-## 5. Synthèse
+## Synthèse
 
 **Points forts (factuels)**
--
 -
 
 **Points de vigilance (factuels)**
 -
+
+**Changé depuis dernière revue**
 -
 
-**Ce qui a changé depuis la dernière revue**
--
-
-**Données manquantes ou incertaines**
+**Données manquantes/incertaines**
 -
 
 ---
 
-## 6. Prompt de contrôle pour le LLM
-
-> À copier-coller avec ce document rempli, pour faire vérifier les données par un LLM :
->
-> "Voici mon analyse fondamentale de [TICKER] datée du [DATE]. Vérifie chaque donnée
-> chiffrée (valorisation, croissance, rentabilité, solidité financière, moyennes
-> sectorielles) par rapport aux informations disponibles les plus récentes. Signale
-> explicitement : (1) les chiffres qui semblent obsolètes ou incorrects avec la source
-> correcte si trouvée, (2) les chiffres que tu ne peux pas vérifier avec confiance,
-> (3) tout événement significatif survenu depuis la date de cette revue qui pourrait
-> affecter l'analyse. Ne modifie aucun champ toi-même — liste uniquement les écarts
-> constatés et laisse-moi mettre à jour le document."
+> Prompt de contrôle LLM : "Voici mon analyse de [TICKER] du [DATE]. Vérifie chaque donnée chiffrée vs infos les plus récentes. Signale : (1) chiffres obsolètes/incorrects + source correcte si trouvée, (2) chiffres non vérifiables avec confiance, (3) événements significatifs depuis la date de revue. Ne modifie rien toi-même — liste les écarts, je mets à jour."
