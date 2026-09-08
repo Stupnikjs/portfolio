@@ -4,13 +4,6 @@ Je vais aussi l’analyser **dans le contexte de ton portefeuille** : tu cherche
 
 # Analyse fondamentale — Saint-Gobain
 
-![Image](https://images.openai.com/static-rsc-4/XcMLh-1QisgB4XIAjOsqRLELA4QJBgIe4QbTTXNosFq_mtwbyAFHXd0fRW71YwLf50tbKcEG-9BJ0UH3acOQgXAlhGPKKZxJwxdpMqv8_WZwnisjyqOnW-66tpI1CO-ISE0Fbja-5ep0ILPsFWbz6yZwEbNq-WM_E5fOklLYbosP4WHyyBpLoqlH697rs9oF?purpose=fullsize)
-
-![Image](https://images.openai.com/static-rsc-4/PVMh-Y8BIu2TQ05yNVZchNToQkzaR2_Vf7ND4QmByX4NpGnm8b203kl8GDBDVfn_R9cri_zvOMLNswAqMxo1n1-pRjBEiXx--DjNBOrcy-HeYzaek_X321kpVwvheH9mYCt8_0Z4HIXavNtsgBBFUYf7zYzZkM6eFJomf0_ISWPJgKmTrZ87hlxoJdqkU68d?purpose=fullsize)
-
-![Image](https://images.openai.com/static-rsc-4/mIV4QcPEPQAJ7FLMscmHHrOcvS__rswNDbgdX0HRWPTRuKBrvPvaNnL7L0wcWTaV9LryWcEI2KWP23hiexUhhXcdmZgs5PBXB3_xiZ1adVv0eFi5uVJMm84Yn_xId2fhhWX6NKCqCcN8jVsXW1IXwCHhaqfF17n2prhXm5WF_V5j7Elg5UAw0zkQ7DubeqA4?purpose=fullsize)
-
-![Image](https://images.openai.com/static-rsc-4/Gv1lFfIUI-sSamP-2jBGtnkDGPaSXNG0BW5QmZRKi1ktRexV49unAikHfIN-8J1XNUrDNz4AePzgFkl7BdZhHFwovkHs7VSYzH0ckKCVp7XBNwZRPp5_qAMv75X3KOAXruAF8ULlIuFi3OCjeLhHiuzl2GyA8ZJSYLnQPYbsa7ikaz2xfDuk1nwAQwTYqUsj?purpose=fullsize)
 
 > **Date de la revue : 08/09/2026**
 > **Dernière revue : première analyse**
